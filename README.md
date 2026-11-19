@@ -54,6 +54,8 @@ On a slow computer live tracking can make playback stutter; turn it off, or use 
 
 Add the parts of the exam you want to look at (*From*, *to*, optional label; *Now* takes the current playback time). Each segment is analysed once. A new segment that overlaps earlier ones only analyses the part not already done, and removing a segment deletes the frames no other segment still covers.
 
+Analysis is saved as it goes, every 30 s of video. *Stop* keeps everything analysed up to that moment, and *Analyse* on the segment carries on from there, so nothing is lost by stopping or by closing the page mid-analysis (at most the last 30 s if the page is closed).
+
 The strip across the top of the timeline shows the whole recording: segments above, analysed parts shaded. Click a segment there or press *Show* to look at that segment alone.
 
 ### The gaze plane
@@ -67,9 +69,14 @@ The plane is the view from the camera: the video sits at the camera position, th
 
 ### Labelling what the student looks at
 
-Choose *click a hotspot or drag a box to label it*, then either click on a busy part of the heatmap (the hotspot around it is outlined automatically) or drag a box. Pick what it is — laptop screen, phone, paper, second screen, keyboard, another person, thinking — or type a name. One region can be marked as *the screen*; everything else counts as looking away.
+Regions name the places the student looks: laptop screen, phone, paper, second screen, keyboard, another person, thinking, or any name you type. One region can be marked as *the screen*; everything else counts as looking away. A *Laptop screen* region is created automatically from the main cluster once there are 10 s of on-screen frames, and is refitted as more is analysed until you edit it.
 
-A *Laptop screen* region is created automatically the first time a recording is analysed, from the main cluster. Regions can be renamed, re-marked or adjusted by typing their edges in degrees.
+To add one:
+
+- **While watching:** when you see her look at something, press **L** or *Label where they’re looking now*. The video pauses and a box is proposed around where her gaze was over the surrounding 0.4 s (from the saved analysis, or live tracking if this moment isn’t analysed). Pick a name and add it.
+- **On the plane:** choose *label and edit regions*, then click a busy part of the heatmap (the hotspot around it is outlined automatically) or drag a box.
+
+To change one, in *label and edit regions* mode: click a region to rename it, mark or unmark it as the screen, or delete it (or press Delete). Drag inside it to move it, or drag its edges and corners to resize it. The regions table under the timeline also lets you rename them and type their edges in degrees. Glance lists and timings update as soon as a region changes.
 
 ### Timeline
 
@@ -81,11 +88,15 @@ Click to go to a moment, drag to highlight a stretch (its points are shown on th
 
 Every stretch of two or more frames off the screen, with start time, length, where it went and how far from the screen centre. Click one to go to just before it. **N** and **P** step through them.
 
-*Lids: narrowed* means the eyelids closed to under 60% of the student's usual opening during the glance. Blinks and looks down both do this, and a look down can register as a short vertical excursion, so check these ones carefully.
+*Lids: narrowed* means the eyelids closed to under 60% of the student's usual opening during the glance. Looks down do this, and so can a blink the blink filter didn't catch, so check these ones carefully.
+
+### Blinks
+
+As the lids close, the face model's eye estimate drops, which shows as a brief downward dip and can be listed as a glance. With *Remove blinks from the eye trace* on (the default), a stretch where the lids are below 70% of the student's usual opening for no more than 400 ms, plus one frame either side, has its eye movement replaced by a straight line from the frame before to the frame after. Longer lid dips are kept, because looking down at the desk lowers the lids too. Removed blinks are marked by a dark line along the top of the *where* band, and the count is shown in the model panel. Both numbers can be changed in the gaze model settings. During live playback, which can't look ahead, a blink holds the last eye position instead.
 
 ### Keyboard
 
-Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · Esc clear highlights.
+Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they're looking · Delete remove the selected region · Esc clear highlights and close the region form.
 
 ### Saving and moving work
 
@@ -113,7 +124,7 @@ gazeH = sH·headH + kH·eyeH        gazeV = sV·headV + kV·eyeV
 - **k** converts the eye measure to degrees. While the student reads the screen, head movements are offset by opposite eye movements, so within the screen cluster `eye = (target − head)/k`. The fit regresses eye on head, `k = −var(head)/cov(eye, head)`. Regressing head on eye instead would be biased towards zero by how much the reading position moves around the screen. The fitted value is used when there are at least 200 on-screen frames, |r| > 0.3 and it lies within 0.4–2.5 times the prior. Otherwise the prior is used, and the model panel says why. Priors are 40°/unit for the face model's estimate (as in UC_TFR) and 140°/unit for iris position (about a 12 mm eyeball radius against a 30 mm eye width). Both scales can be set by hand.
 - **The screen** is the densest region of a smoothed 1° histogram of gaze, with frames within 12° of it treated as on-screen while fitting.
 - **Posture drift** is followed by re-centring on the median of on-screen frames over a moving window (60 s by default), so slumping or a nudged laptop lid doesn't move the clusters.
-- **Blinks**: the last eye position is held for up to 300 ms while an eye is closed.
+- **Blinks** are removed as described above. Where the eyes can't be measured at all, the last eye position is held for up to 300 ms.
 
 The fitting is repeated whenever segments are added, using the saved measurements; the face tracker is not re-run.
 
@@ -133,7 +144,7 @@ When a capture overlaps frames already analysed, its thumbnails are matched agai
 
 - **Size of eye movements.** At 640×480 the iris is about 13–15 px across and the eye about 30–35 px wide. Frame-to-frame noise is about 1.5–2°, with slow drift between the two eyes of up to about 7°. Glances needing 15° or more of eye rotation stand out clearly; movements under about 5° are not distinguishable from drift. Glasses glare and poor light make this worse.
 - **Compression.** Heavily compressed video may not encode very small eye movements at all between keyframes.
-- **Blinks and looks down** both narrow the lids and can look alike. Check glances marked *narrowed*.
+- **Blinks and looks down** both narrow the lids. The blink filter separates them by duration only, so a very quick glance down (under 400 ms, with the lids dropping below 70%) can be removed as a blink. Turn the filter off, or shorten its limit, when checking for quick looks at the desk.
 - **Unusual eyes.** Strabismus, nystagmus and similar conditions produce patterns that are not glances. A heatmap with two overlapping screen clusters, or a constantly moving trace, is a reason to rely on the video alone.
 - **Formats.** WebM (VP8, VP9, AV1) is supported for files; other formats can be reviewed through screen capture. Frame-by-frame decoding needs WebCodecs (current Chrome, Edge, Firefox or Safari).
 - **Speed.** Analysis runs the face model on every frame. It is much faster with a GPU; in a software-only graphics environment it ran at about 3 frames/s.

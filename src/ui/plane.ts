@@ -22,7 +22,13 @@ export interface PlaneState {
   trailMs: number;
   /** Frames tracked live during playback, drawn when there is no saved analysis at the playhead. */
   live: { trail: LivePoint[]; point: LivePoint | null } | null;
+  /** Regions can be selected, moved and resized. */
+  editable: boolean;
+  selectedRegion: string | null;
 }
+
+type Grab = "move" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+const CURSORS: Record<Grab, string> = { move: "move", n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
 
 /** Camera-centred azimuth/elevation plane. h positive = image right (student's left), v positive = up. */
 export class GazePlane {
@@ -30,7 +36,15 @@ export class GazePlane {
   private heat: { key: string; cells: Float32Array; max: number } | null = null;
   private box = { x: 0, y: 0, s: 1 };
   private drag: { h: number; v: number } | null = null;
+  private grab: { id: string; how: Grab; from: { h: number; v: number }; orig: Rect; moved: boolean } | null = null;
+  private regions: Region[] = [];
+  private editable = false;
   onRect?: (r: Rect | null) => void;
+  /** A region is being moved or resized (called repeatedly), then finished. */
+  onRegionDrag?: (id: string, r: Rect) => void;
+  onRegionDone?: (id: string) => void;
+  /** A region was clicked without moving it. */
+  onRegionSelect?: (id: string) => void;
   /** A click (no drag) on the plane, in degrees. */
   onClick?: (p: { h: number; v: number }) => void;
   onDraft?: (r: Rect | null) => void;
@@ -38,14 +52,44 @@ export class GazePlane {
   constructor(public canvas: HTMLCanvasElement) {
     canvas.addEventListener("pointerdown", (e) => {
       canvas.setPointerCapture(e.pointerId);
+      const hit = this.editable ? this.hitRegion(e) : null;
+      if (hit) {
+        const r = this.regions.find((x) => x.id === hit.id)!;
+        this.grab = { id: hit.id, how: hit.how, from: this.toDeg(e), orig: norm(r), moved: false };
+        return;
+      }
       this.drag = this.toDeg(e);
     });
     canvas.addEventListener("pointermove", (e) => {
-      if (!this.drag) return;
+      if (this.grab) {
+        const p = this.toDeg(e), g = this.grab;
+        const dh = p.h - g.from.h, dv = p.v - g.from.v;
+        if (Math.abs(dh) * this.box.s > 2 || Math.abs(dv) * this.box.s > 2) g.moved = true;
+        if (!g.moved) return;
+        const r = { ...g.orig };
+        if (g.how === "move") { r.h0 += dh; r.h1 += dh; r.v0 += dv; r.v1 += dv; }
+        if (g.how.includes("w")) r.h0 = Math.min(r.h1 - 1, g.orig.h0 + dh);
+        if (g.how.includes("e")) r.h1 = Math.max(r.h0 + 1, g.orig.h1 + dh);
+        if (g.how.includes("s")) r.v0 = Math.min(r.v1 - 1, g.orig.v0 + dv);
+        if (g.how.includes("n")) r.v1 = Math.max(r.v0 + 1, g.orig.v1 + dv);
+        this.onRegionDrag?.(g.id, roundRect(r));
+        return;
+      }
+      if (!this.drag) {
+        const hit = this.editable ? this.hitRegion(e) : null;
+        canvas.style.cursor = hit ? CURSORS[hit.how] : "crosshair";
+        return;
+      }
       const p = this.toDeg(e);
       this.onDraft?.({ h0: this.drag.h, h1: p.h, v0: this.drag.v, v1: p.v });
     });
     canvas.addEventListener("pointerup", (e) => {
+      if (this.grab) {
+        const g = this.grab;
+        this.grab = null;
+        if (g.moved) this.onRegionDone?.(g.id); else this.onRegionSelect?.(g.id);
+        return;
+      }
       if (!this.drag) return;
       const p = this.toDeg(e);
       const r = { h0: Math.min(this.drag.h, p.h), h1: Math.max(this.drag.h, p.h), v0: Math.min(this.drag.v, p.v), v1: Math.max(this.drag.v, p.v) };
@@ -53,6 +97,28 @@ export class GazePlane {
       this.onDraft?.(null);
       if (r.h1 - r.h0 < 1.5 && r.v1 - r.v0 < 1.5) this.onClick?.(p); else this.onRect?.(r);
     });
+  }
+
+  /** Region edge, corner or inside under the pointer (smallest region wins). */
+  private hitRegion(e: PointerEvent): { id: string; how: Grab } | null {
+    const rc = this.canvas.getBoundingClientRect();
+    const x = e.clientX - rc.left, y = e.clientY - rc.top;
+    const X = (h: number) => this.box.x + (h - this.view.h0) * this.box.s;
+    const Y = (v: number) => this.box.y + (this.view.v1 - v) * this.box.s;
+    const tol = 7;
+    let best: { id: string; how: Grab; area: number } | null = null;
+    for (const reg of this.regions) {
+      const r = norm(reg);
+      const x0 = X(r.h0), x1 = X(r.h1), y0 = Y(r.v1), y1 = Y(r.v0);
+      if (x < x0 - tol || x > x1 + tol || y < y0 - tol || y > y1 + tol) continue;
+      const nearW = Math.abs(x - x0) <= tol, nearE = Math.abs(x - x1) <= tol, nearN = Math.abs(y - y0) <= tol, nearS = Math.abs(y - y1) <= tol;
+      let how: Grab = "move";
+      if (nearN || nearS || nearW || nearE) how = ((nearN ? "n" : nearS ? "s" : "") + (nearW ? "w" : nearE ? "e" : "")) as Grab;
+      else if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+      const area = (x1 - x0) * (y1 - y0) - (how !== "move" ? 1e9 : 0); // edges beat insides
+      if (!best || area < best.area) best = { id: reg.id, how, area };
+    }
+    return best;
   }
 
   private toDeg(e: PointerEvent): { h: number; v: number } {
@@ -162,10 +228,16 @@ export class GazePlane {
     }
 
     // Regions.
+    this.regions = st.regions; this.editable = st.editable;
     for (const r of st.regions) {
       const x0 = X(Math.min(r.h0, r.h1)), x1 = X(Math.max(r.h0, r.h1)), y0 = Y(Math.max(r.v0, r.v1)), y1 = Y(Math.min(r.v0, r.v1));
-      ctx.strokeStyle = r.colour; ctx.lineWidth = 2;
+      const sel = r.id === st.selectedRegion;
+      ctx.strokeStyle = r.colour; ctx.lineWidth = sel ? 3 : 2;
       ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      if (st.editable) {
+        ctx.fillStyle = r.colour;
+        for (const [hx, hy] of [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]) ctx.fillRect(hx - (sel ? 4 : 3), hy - (sel ? 4 : 3), sel ? 8 : 6, sel ? 8 : 6);
+      }
       ctx.fillStyle = r.colour;
       ctx.font = "600 12px system-ui, sans-serif"; ctx.textAlign = "left";
       ctx.fillText(r.name, x0 + 4, y0 + 14);
@@ -258,4 +330,12 @@ function buildHeat(g: GazeSeries, scope: Interval | null, V: { h0: number; h1: n
     if (c > max) max = c;
   }
   return { key, cells, max };
+}
+
+function norm(r: Rect): Rect {
+  return { h0: Math.min(r.h0, r.h1), h1: Math.max(r.h0, r.h1), v0: Math.min(r.v0, r.v1), v1: Math.max(r.v0, r.v1) };
+}
+function roundRect(r: Rect): Rect {
+  const q = (x: number) => Math.round(x * 2) / 2;
+  return { h0: q(r.h0), h1: q(r.h1), v0: q(r.v0), v1: q(r.v1) };
 }

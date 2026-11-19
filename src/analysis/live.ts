@@ -23,9 +23,13 @@ export class LiveGaze {
     let eh: number, ev: number;
     if (s.eyeSource === "blend") { eh = avg(values.bHL, values.bHR); ev = avg(values.bVL, values.bVR); }
     else { eh = avg(values.iHL, values.iHR) - 0.5; ev = avg(values.iVL, values.iVR); }
-    if (Number.isFinite(eh) && Number.isFinite(ev)) this.lastEye = { t, h: eh, v: ev };
-    else if (t - this.lastEye.t <= s.blinkHoldMs) { eh = this.lastEye.h; ev = this.lastEye.v; }
-    else { this.last = null; return null; }
+    // Live can't look ahead, so a blink holds the last eye position instead of interpolating.
+    const lidMed = g?.model.lidMedian;
+    const lid = avg(values.openL, values.openR);
+    const closing = s.blinkFilter && Number.isFinite(lidMed) && Number.isFinite(lid) && lid / lidMed! < s.blinkLidPct / 100;
+    if (!closing && Number.isFinite(eh) && Number.isFinite(ev)) this.lastEye = { t, h: eh, v: ev };
+    else if (t - this.lastEye.t <= Math.max(s.blinkHoldMs, s.blinkFilter ? s.blinkMaxMs : 0)) { eh = this.lastEye.h; ev = this.lastEye.v; }
+    else if (!(Number.isFinite(eh) && Number.isFinite(ev))) { this.last = null; return null; }
     const m = g?.model;
     const prior = PRIORS[s.eyeSource];
     const kH = s.kH ?? m?.kH ?? prior.kH, kV = s.kV ?? m?.kV ?? prior.kV;

@@ -25,6 +25,8 @@ export interface GazeSeries {
   onScreen: Uint8Array;
   /** Lid opening relative to this student's median (1 = typical; NaN = unknown). */
   lid: Float32Array;
+  /** 1 = a blink was removed here (eye movement replaced by interpolation). */
+  blink: Uint8Array;
   /** Drift correction applied to each frame (°), so live frames can be corrected the same way. */
   dH: Float32Array;
   dV: Float32Array;
@@ -44,6 +46,9 @@ export interface GazeModelInfo {
   screenFraction: number;
   frameIntervalMs: number;
   validFraction: number;
+  /** The student's median lid opening (lid gap / eye width), for live blink detection. */
+  lidMedian: number;
+  blinksRemoved: number;
 }
 
 /** Prior degrees per unit of eye measure, with the sign for the display convention. */
@@ -73,7 +78,9 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
     const { r, j } = refs[i];
     const c = r.cols;
     t[i] = r.t[j];
-    breakBefore[i] = i === 0 || refs[i - 1].r !== r || t[i] - t[i - 1] > gapMs ? 1 : 0;
+    // Runs that follow on from each other (saved in pieces) join up; an unaligned capture never does.
+    const otherRun = i > 0 && refs[i - 1].r !== r && (refs[i - 1].r.approx || r.approx);
+    breakBefore[i] = i === 0 || otherRun || t[i] - t[i - 1] > gapMs ? 1 : 0;
     if (breakBefore[i]) lastEyeT = -Infinity;
     valid[i] = r.valid[j];
     headH[i] = c.headH[j]; headV[i] = c.headV[j]; noseX[i] = c.noseX[j]; noseY[i] = c.noseY[j];
@@ -85,6 +92,14 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
     else if (t[i] - lastEyeT <= s.blinkHoldMs) { h = lastH; v = lastV; }
     eH[i] = h; eV[i] = v;
   }
+
+  const lids: number[] = [];
+  for (let k = 0; k < n; k += 3) if (Number.isFinite(lid[k])) lids.push(lid[k]);
+  const lidMed = lids.length ? median(lids) : NaN;
+  for (let k = 0; k < n; k++) lid[k] = lid[k] / lidMed;
+
+  const blink = new Uint8Array(n);
+  const blinksRemoved = s.blinkFilter ? removeBlinks(t, eH, eV, lid, breakBefore, s.blinkLidPct / 100, s.blinkMaxMs, blink) : 0;
 
   // Head sign conventions from the geometric nose position (image-right / downward movement).
   const rx = corr(headH, noseX, valid), ry = corr(headV, noseY, valid);
@@ -131,23 +146,56 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
     }
   }
 
-  const lids: number[] = [];
-  for (let k = 0; k < n; k += 3) if (Number.isFinite(lid[k])) lids.push(lid[k]);
-  const lidMed = lids.length ? median(lids) : NaN;
-  for (let k = 0; k < n; k++) lid[k] = lid[k] / lidMed;
-
   let nOk = 0, nMem = 0;
   for (let k = 0; k < n; k++) { nOk += ok[k]; nMem += member[k]; }
   return {
-    t, h: gh, v: gv, ok, breakBefore, onScreen: member, lid, dH, dV, n,
+    t, h: gh, v: gv, ok, breakBefore, onScreen: member, lid, blink, dH, dV, n,
     model: {
       kH, kV, kHSource, kVSource, rH, rV, headSignH, headSignV, headSignNote,
       screenH: centre.h, screenV: centre.v, screenRadius: SCREEN_RADIUS,
       screenFraction: nOk ? nMem / nOk : 0,
       frameIntervalMs: rec.frameIntervalMs,
       validFraction: n ? nOk / n : 0,
+      lidMedian: lidMed,
+      blinksRemoved,
     },
   };
+}
+
+/**
+ * Blinks drag the eye estimate downwards for a few frames as the lids close. A blink is a
+ * stretch where the lids are below `lidFrac` of the usual opening (or the eyes were too
+ * closed to measure) lasting no more than `maxMs`, widened by one frame each side to catch
+ * the closing and reopening. Its eye values are replaced by a straight line between the
+ * frames either side. Longer lid dips are left alone: looking down at the desk lowers the
+ * lids too, and that is real gaze.
+ */
+export function removeBlinks(t: Float64Array, eH: Float32Array, eV: Float32Array, lid: Float32Array, breakBefore: Uint8Array,
+  lidFrac: number, maxMs: number, out: Uint8Array): number {
+  const n = t.length;
+  let count = 0, k = 0;
+  const closing = (i: number) => lid[i] < lidFrac || !Number.isFinite(lid[i]);
+  while (k < n) {
+    if (!closing(k)) { k++; continue; }
+    let e = k;
+    while (e + 1 < n && !breakBefore[e + 1] && closing(e + 1)) e++;
+    const a = k > 0 && !breakBefore[k] ? k - 1 : k;           // pad one frame each side
+    const b = e + 1 < n && !breakBefore[e + 1] ? e + 1 : e;
+    const before = a > 0 && !breakBefore[a] ? a - 1 : -1;
+    const after = b + 1 < n && !breakBefore[b + 1] ? b + 1 : -1;
+    const dur = t[e] - t[k];
+    if (dur <= maxMs && before >= 0 && after >= 0 && Number.isFinite(eH[before]) && Number.isFinite(eH[after])) {
+      for (let i = a; i <= b; i++) {
+        const f = (t[i] - t[before]) / (t[after] - t[before]);
+        eH[i] = eH[before] + f * (eH[after] - eH[before]);
+        eV[i] = eV[before] + f * (eV[after] - eV[before]);
+        out[i] = 1;
+      }
+      count++;
+    }
+    k = e + 1;
+  }
+  return count;
 }
 
 export function avg(a: number, b: number): number {

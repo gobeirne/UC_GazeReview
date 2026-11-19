@@ -2,7 +2,7 @@ import type { MediaPipeFaceTracker } from "../tracking/MediaPipeFaceTracker";
 import { Fingerprinter, measure, RunBuilder } from "../analysis/frame";
 import type { Interval } from "../analysis/intervals";
 import type { Run } from "../store/types";
-import type { ByteSource, WebmIndex } from "./webm";
+import { medianFrameInterval, type ByteSource, type WebmIndex } from "./webm";
 
 export async function fileIdentity(file: File): Promise<string> {
   const MB = 1 << 20;
@@ -44,15 +44,24 @@ const clock = trackerClock;
 
 const WARMUP_MS = 1000;
 
+/** Analysed frames are handed over for saving in pieces of this much video. */
+const CHUNK_MS = 30_000;
+
+export interface GapResult { frames: number; stopped: boolean; reachedMs: number }
+
 /**
  * Decodes and tracks every frame in `gap`. Decoding starts at the keyframe at or before
  * gap.start − 1 s; frames before gap.start warm the tracker up and are discarded.
+ *
+ * Results are handed to onChunk every 30 s of video, so a long stretch is saved as it
+ * goes. If analysis is stopped or fails, the frames done so far are handed over too,
+ * covering up to the last analysed frame, and the next run carries on from there.
  */
 export async function analyseGap(
   src: ByteSource, ix: WebmIndex, cfg: VideoDecoderConfig, gap: Interval, recId: string,
   tracker: MediaPipeFaceTracker, fpr: Fingerprinter,
-  onProgress: (p: AnalyseProgress) => void, signal: AbortSignal,
-): Promise<Run> {
+  onProgress: (p: AnalyseProgress) => void, onChunk: (run: Run) => void, signal: AbortSignal,
+): Promise<GapResult> {
   const frames = ix.frames;
   let first = 0;
   for (let i = 0; i < frames.length; i++) {
@@ -63,7 +72,9 @@ export async function analyseGap(
   for (let i = first; i < frames.length; i++) if (frames[i].t >= gap.end + 500) { last = i; break; }
   const total = frames.filter((f) => f.t >= gap.start && f.t < gap.end).length;
 
-  const builder = new RunBuilder(recId, gap);
+  const dt = medianFrameInterval(frames);
+  let builder = new RunBuilder(recId, gap);
+  let chunkStart = gap.start, lastT = NaN, count = 0;
   const queue: VideoFrame[] = [];
   let decodeError: unknown = null;
   let wake: (() => void) | null = null;
@@ -80,9 +91,15 @@ export async function analyseGap(
       if (t >= gap.start - WARMUP_MS && t < gap.end) {
         const res = tracker.detect(f, clock.at(t));
         if (t >= gap.start) {
+          if (t >= chunkStart + CHUNK_MS && builder.count) {
+            onChunk(builder.finish(t));
+            chunkStart = t;
+            builder = new RunBuilder(recId, { start: t, end: gap.end });
+          }
           fpr.drawMid(f);
           builder.push(t, measure(res.raw), fpr.fingerprint());
-          onProgress({ done: builder.count, total, tMs: t });
+          lastT = t; count++;
+          onProgress({ done: count, total, tMs: t });
         }
       }
     } finally { f.close(); }
@@ -92,7 +109,7 @@ export async function analyseGap(
       if (decodeError) throw decodeError;
       if (signal.aborted) throw new DOMException("Analysis stopped", "AbortError");
       const f = queue.shift();
-      if (f) { process(f); if (builder.count % 15 === 0) await new Promise((r) => setTimeout(r, 0)); continue; }
+      if (f) { process(f); if (count % 15 === 0) await new Promise((r) => setTimeout(r, 0)); continue; }
       await new Promise<void>((r) => { wake = r; setTimeout(r, 50); });
       wake = null;
     }
@@ -116,9 +133,16 @@ export async function analyseGap(
     await decoder.flush();
     await drain(0);
     while (queue.length) process(queue.shift()!);
+  } catch (e) {
+    // Keep what was done: coverage ends at the next frame, which is where analysis resumes.
+    const next = frames.find((f) => f.t > lastT)?.t ?? lastT + dt;
+    if (builder.count) onChunk(builder.finish(next));
+    if ((e as Error).name === "AbortError") return { frames: count, stopped: true, reachedMs: builder.count ? next : chunkStart };
+    throw e;
   } finally {
     for (const f of queue) f.close();
     if (decoder.state !== "closed") decoder.close();
   }
-  return builder.finish();
+  if (builder.count) onChunk(builder.finish(gap.end));
+  return { frames: count, stopped: false, reachedMs: gap.end };
 }

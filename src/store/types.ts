@@ -53,6 +53,8 @@ export interface Region {
   isScreen: boolean;
   /** Rectangle in display coordinates: h positive = towards the student's left (image right), v positive = up. Degrees. */
   h0: number; h1: number; v0: number; v1: number;
+  /** Placed automatically from the on-screen cluster; refitted as more is analysed until the reviewer edits it. */
+  auto?: boolean;
 }
 
 export interface RecordingSettings {
@@ -66,6 +68,12 @@ export interface RecordingSettings {
   minFrames: number;
   /** Eye value is held through blinks up to this long (ms). */
   blinkHoldMs: number;
+  /** Replace the eye movement during blinks with a straight line from before to after. */
+  blinkFilter: boolean;
+  /** Lids below this percentage of the student's usual opening count as closing. */
+  blinkLidPct: number;
+  /** Lid dips longer than this (ms) are kept: they are looks down, not blinks. */
+  blinkMaxMs: number;
 }
 
 export const DEFAULT_SETTINGS: RecordingSettings = {
@@ -75,6 +83,9 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   driftWindowS: 60,
   minFrames: 2,
   blinkHoldMs: 300,
+  blinkFilter: true,
+  blinkLidPct: 70,
+  blinkMaxMs: 400,
 };
 
 export interface Recording {

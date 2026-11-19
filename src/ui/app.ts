@@ -35,6 +35,7 @@ export class App {
   private planeBrush: Rect | null = null;
   private planeDraft: Rect | null = null;
   private pendingRegion: Rect | null = null;
+  private editRegionId: string | null = null;
   private dragMode: "highlight" | "region" = "highlight";
   private selectedEvent = -1;
   private eventFilter = "all";
@@ -138,7 +139,7 @@ export class App {
 
     this.plane.onDraft = (r) => { this.planeDraft = r; };
     this.plane.onRect = (r) => {
-      if (this.dragMode === "region" && r) { this.pendingRegion = r; this.renderRegionForm(); return; }
+      if (this.dragMode === "region" && r) { this.pendingRegion = r; this.editRegionId = null; this.renderRegionForm(); return; }
       this.planeBrush = r;
       this.planeDraft = null;
     };
@@ -147,13 +148,23 @@ export class App {
         const r = this.plane.hotspotAt(p);
         if (!r) return this.say("There’s no hotspot there. Click on a busy part of the heatmap, or drag a box.");
         this.pendingRegion = r;
+        this.editRegionId = null;
         this.renderRegionForm();
         return;
       }
       this.planeBrush = null;
     };
     this.root.querySelectorAll<HTMLInputElement>('input[name="dragmode"]').forEach((i) =>
-      i.addEventListener("change", () => { this.dragMode = i.value as "highlight" | "region"; }));
+      i.addEventListener("change", () => this.setDragMode(i.value as "highlight" | "region")));
+    this.plane.onRegionDrag = (id, r) => {
+      const reg = this.rec?.regions.find((x) => x.id === id);
+      if (reg) Object.assign(reg, r, { auto: false });
+      this.editRegionId = id;
+      this.pendingRegion = null;
+    };
+    this.plane.onRegionDone = (id) => { this.editRegionId = id; this.renderRegionForm(); this.saveRec(); this.recompute(); };
+    this.plane.onRegionSelect = (id) => { this.editRegionId = id; this.pendingRegion = null; this.renderRegionForm(); };
+    this.q("#label-now").addEventListener("click", () => { this.video.pause(); this.labelLookingNow(); });
     this.q<HTMLInputElement>("#show-heat").addEventListener("change", () => this.drawCanvases());
     this.q("#fit-plane").addEventListener("click", () => { this.plane.fitTo(this.gaze); this.drawCanvases(); });
     this.q("#clear-hl").addEventListener("click", () => { this.planeBrush = null; this.timeBrush = null; this.drawCanvases(); });
@@ -192,7 +203,7 @@ export class App {
     this.q("#regions").addEventListener("change", (e) => this.regionEdit(e));
     this.q("#regions").addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest("button[data-act=delete]") as HTMLElement | null;
-      if (b && this.rec) { this.rec.regions = this.rec.regions.filter((r) => r.id !== b.dataset.id); this.saveRec(); this.recompute(); }
+      if (b) this.deleteRegion(b.dataset.id!);
     });
     this.q("#settings").addEventListener("change", () => this.readSettings());
 
@@ -204,7 +215,9 @@ export class App {
       else if (e.key === "." || e.key === "ArrowRight") { e.preventDefault(); this.stepFrames(e.shiftKey ? 10 : 1); }
       else if (e.key === "n") this.selectEvent(this.nextEvent(1));
       else if (e.key === "p") this.selectEvent(this.nextEvent(-1));
-      else if (e.key === "Escape") { this.planeBrush = null; this.timeBrush = null; this.pendingRegion = null; this.renderRegionForm(); }
+      else if (e.key === "Escape") { this.planeBrush = null; this.timeBrush = null; this.pendingRegion = null; this.editRegionId = null; this.renderRegionForm(); }
+      else if ((e.key === "Delete" || e.key === "Backspace") && this.editRegionId) { e.preventDefault(); this.deleteRegion(this.editRegionId); }
+      else if (e.key === "l") { this.video.pause(); this.labelLookingNow(); }
     });
   }
 
@@ -386,22 +399,37 @@ export class App {
       const cfg = await chooseDecoderConfig(this.index);
       const fpr = new Fingerprinter();
       let doneBefore = 0;
-      for (const gap of gaps) {
-        const run = await analyseGap(this.src, this.index, cfg, gap, this.rec.id, this.tracker, fpr, (p) => {
-          this.busy!.done = doneBefore + p.done;
-          this.busy!.label = `Analysing ${fmtTime(p.tMs, 0)}`;
-          this.renderBusy(started);
-        }, abort.signal);
-        doneBefore += run.t.length;
-        await db.putRuns([run]);
-        this.runs = await db.getRuns(this.rec.id);
-        this.recompute();
+      const recId = this.rec.id;
+      // Each piece is saved as soon as it arrives, one after another.
+      let saving: Promise<void> = Promise.resolve();
+      const onChunk = (run: Run) => {
+        saving = saving.then(async () => {
+          await db.putRuns([run]);
+          if (this.rec?.id !== recId) return;
+          this.runs = await db.getRuns(recId);
+          this.recompute();
+        });
+      };
+      let stoppedAt = NaN;
+      try {
+        for (const gap of gaps) {
+          const res = await analyseGap(this.src, this.index, cfg, gap, recId, this.tracker, fpr, (p) => {
+            this.busy!.done = doneBefore + p.done;
+            this.busy!.label = `Analysing ${fmtTime(p.tMs, 0)}`;
+            this.renderBusy(started);
+          }, onChunk, abort.signal);
+          doneBefore += res.frames;
+          if (res.stopped) { stoppedAt = res.reachedMs; break; }
+        }
+      } finally {
+        await saving;
       }
       const s = (performance.now() - started) / 1000;
-      this.say(`Analysed ${doneBefore.toLocaleString()} frames in ${s.toFixed(0)} s.`);
+      this.say(Number.isFinite(stoppedAt)
+        ? `Stopped at ${fmtTime(stoppedAt, 0)}. The ${doneBefore.toLocaleString()} frames analysed so far are kept; press Analyse to carry on from there.`
+        : `Analysed ${doneBefore.toLocaleString()} frames in ${s.toFixed(0)} s.`);
     } catch (e) {
-      if ((e as Error).name === "AbortError") this.say("Analysis stopped. Frames analysed so far in the current stretch were not kept; completed stretches were.");
-      else this.say(`Analysis failed: ${(e as Error).message}`);
+      this.say(`Analysis failed: ${(e as Error).message}. Frames analysed before the failure are kept.`);
     } finally {
       this.busy = null;
       this.renderBusy();
@@ -414,7 +442,7 @@ export class App {
     if (!this.rec) return;
     this.coverage = union([], this.runs.map((r) => ({ start: r.start, end: r.end })));
     this.gaze = this.runs.length ? buildGaze(this.runs, this.rec) : null;
-    if (this.gaze && !this.rec.regions.length && this.gaze.model.validFraction > 0.2) this.autoScreen();
+    if (this.gaze && this.gaze.model.validFraction > 0.2 && (!this.rec.regions.length || this.rec.regions.some((r) => r.auto))) this.autoScreen();
     this.labels = this.gaze ? classify(this.gaze, this.rec.regions) : null;
     this.events = this.gaze && this.labels ? findEvents(this.gaze, this.labels, this.rec.settings.minFrames) : [];
     this.plane.invalidateHeat();
@@ -424,61 +452,131 @@ export class App {
   }
 
   /** First time data arrives: a Screen region around the on-screen cluster (2nd–98th percentiles, +2°). */
+  /**
+   * The automatic screen region (2nd–98th percentiles of the on-screen cluster, +2°). Created
+   * once there are 10 s of on-screen frames, and refitted as more is analysed until the
+   * reviewer edits it, so it isn't fixed by the first few seconds of a long analysis.
+   */
   private autoScreen() {
-    const g = this.gaze!;
+    const g = this.gaze!, rec = this.rec!;
     const hs: number[] = [], vs: number[] = [];
     for (let i = 0; i < g.n; i++) if (g.onScreen[i]) { hs.push(g.h[i]); vs.push(g.v[i]); }
-    if (hs.length < 30) return;
+    if (hs.length * rec.frameIntervalMs < 10_000) return;
     hs.sort((a, b) => a - b); vs.sort((a, b) => a - b);
     const q = (a: number[], p: number) => a[Math.floor(p * (a.length - 1))];
-    this.rec!.regions.push({
-      id: newId("reg"), name: "Laptop screen", colour: SCREEN_COLOUR, isScreen: true,
-      h0: Math.round(q(hs, 0.02) - 2), h1: Math.round(q(hs, 0.98) + 2), v0: Math.round(q(vs, 0.02) - 2), v1: Math.round(q(vs, 0.98) + 2),
-    });
+    const box = { h0: Math.round(q(hs, 0.02) - 2), h1: Math.round(q(hs, 0.98) + 2), v0: Math.round(q(vs, 0.02) - 2), v1: Math.round(q(vs, 0.98) + 2) };
+    const existing = rec.regions.find((r) => r.auto);
+    if (existing) {
+      if (existing.h0 === box.h0 && existing.h1 === box.h1 && existing.v0 === box.v0 && existing.v1 === box.v1) return;
+      Object.assign(existing, box);
+    } else {
+      rec.regions.push({ id: newId("reg"), name: "Laptop screen", colour: SCREEN_COLOUR, isScreen: true, auto: true, ...box });
+    }
     this.saveRec();
   }
 
   // ---------- Regions ----------
 
+  /** The form for naming a new region, or editing the selected one. */
   private renderRegionForm() {
     const f = this.q("#region-form");
-    if (!this.pendingRegion) { f.hidden = true; f.innerHTML = ""; return; }
+    const editing = this.rec?.regions.find((r) => r.id === this.editRegionId) ?? null;
+    if (!this.pendingRegion && !editing) { f.hidden = true; f.innerHTML = ""; return; }
     f.hidden = false;
     const n = (this.rec?.regions.filter((r) => !r.isScreen).length ?? 0) + 1;
-    const hasScreen = this.rec?.regions.some((r) => r.isScreen);
-    f.innerHTML = `<span>What is it?</span>
-      ${REGION_PRESETS.map((p) => `<button type="button" class="chip" data-preset="${esc(p)}">${esc(p)}</button>`).join("")}
-      <label>Name <input id="rf-name" value="Region ${n}" maxlength="40" list="region-names"></label>
-      <label class="check"><input type="checkbox" id="rf-screen"> This is the screen</label>
-      <button id="rf-add" class="primary">Add region</button> <button id="rf-cancel">Cancel</button>`;
+    const otherScreen = this.rec?.regions.some((r) => r.isScreen && r.id !== editing?.id);
+    const current = editing?.name ?? `Region ${n}`;
+    f.innerHTML = `<span>${editing ? "Edit region" : "What is it?"}</span>
+      ${REGION_PRESETS.map((p) => `<button type="button" class="chip ${p === current ? "on" : ""}" data-preset="${esc(p)}">${esc(p)}</button>`).join("")}
+      <label>Name <input id="rf-name" value="${esc(current)}" maxlength="40" list="region-names"></label>
+      <label class="check"><input type="checkbox" id="rf-screen" ${editing?.isScreen ? "checked" : ""}> This is the screen</label>
+      <button id="rf-add" class="primary">${editing ? "Save" : "Add region"}</button>
+      ${editing ? `<button id="rf-delete" class="danger">Delete region</button>` : ""}
+      <button id="rf-cancel">${editing ? "Close" : "Cancel"}</button>
+      ${editing ? `<span class="muted small">Drag the region on the plane to move it, or its edges and corners to resize it.</span>` : ""}`;
     const name = this.q<HTMLInputElement>("#rf-name");
-    name.focus(); name.select();
+    if (!editing) { name.focus(); name.select(); }
     f.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((b) => b.addEventListener("click", () => {
       name.value = b.dataset.preset!;
-      this.q<HTMLInputElement>("#rf-screen").checked = b.dataset.preset === SCREEN_PRESET && !hasScreen;
+      this.q<HTMLInputElement>("#rf-screen").checked = b.dataset.preset === SCREEN_PRESET && !otherScreen;
       f.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === b));
     }));
-    const add = () => {
-      if (!this.rec || !this.pendingRegion) return;
+    const save = () => {
+      if (!this.rec) return;
       const isScreen = this.q<HTMLInputElement>("#rf-screen").checked;
-      const used = new Set(this.rec.regions.map((r) => r.colour));
-      const colour = isScreen ? SCREEN_COLOUR : REGION_COLOURS.find((c) => !used.has(c)) ?? REGION_COLOURS[n % REGION_COLOURS.length];
-      const r = this.pendingRegion;
-      this.rec.regions.push({ id: newId("reg"), name: name.value.trim() || `Region ${n}`, colour, isScreen, h0: round1(r.h0), h1: round1(r.h1), v0: round1(r.v0), v1: round1(r.v1) });
-      this.pendingRegion = null;
+      if (editing) {
+        editing.auto = false;
+        editing.name = name.value.trim() || editing.name;
+        if (isScreen !== editing.isScreen) {
+          editing.isScreen = isScreen;
+          editing.colour = isScreen ? SCREEN_COLOUR : this.freeColour(n);
+        }
+        this.editRegionId = null;
+      } else if (this.pendingRegion) {
+        const r = this.pendingRegion;
+        this.rec.regions.push({ id: newId("reg"), name: name.value.trim() || `Region ${n}`, colour: isScreen ? SCREEN_COLOUR : this.freeColour(n), isScreen, h0: round1(r.h0), h1: round1(r.h1), v0: round1(r.v0), v1: round1(r.v1) });
+        this.pendingRegion = null;
+      }
       this.renderRegionForm();
       this.saveRec();
       this.recompute();
     };
-    this.q("#rf-add").addEventListener("click", add);
-    name.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); });
-    this.q("#rf-cancel").addEventListener("click", () => { this.pendingRegion = null; this.renderRegionForm(); });
+    this.q("#rf-add").addEventListener("click", save);
+    name.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+    this.root.querySelector("#rf-delete")?.addEventListener("click", () => editing && this.deleteRegion(editing.id));
+    this.q("#rf-cancel").addEventListener("click", () => { this.pendingRegion = null; this.editRegionId = null; this.renderRegionForm(); });
+  }
+
+  private freeColour(n: number): string {
+    const used = new Set(this.rec?.regions.map((r) => r.colour));
+    return REGION_COLOURS.find((c) => !used.has(c)) ?? REGION_COLOURS[n % REGION_COLOURS.length];
+  }
+
+  private deleteRegion(id: string) {
+    if (!this.rec) return;
+    const r = this.rec.regions.find((x) => x.id === id);
+    if (!r || !confirm(`Delete the region “${r.name}”?`)) return;
+    this.rec.regions = this.rec.regions.filter((x) => x.id !== id);
+    if (this.editRegionId === id) this.editRegionId = null;
+    this.renderRegionForm();
+    this.saveRec();
+    this.recompute();
+  }
+
+  /** Proposes a region around where the student is looking at the playhead (±0.4 s), from the saved analysis or live tracking. */
+  private labelLookingNow() {
+    if (!this.rec) return;
+    const ph = this.playhead(), hs: number[] = [], vs: number[] = [];
+    const g = this.gaze;
+    if (g) {
+      for (let i = Math.max(0, indexAt(g.t, ph - 400)); i < g.n && g.t[i] <= ph + 400; i++) if (g.ok[i] && g.t[i] >= ph - 400) { hs.push(g.h[i]); vs.push(g.v[i]); }
+    }
+    if (hs.length < 3) for (const p of this.live.trail) if (Math.abs(p.t - ph) <= 400) { hs.push(p.h); vs.push(p.v); }
+    if (!hs.length) {
+      const now = this.gazeNow();
+      if (now) { hs.push(now.h); vs.push(now.v); }
+    }
+    if (!hs.length) return this.say("There’s no gaze at this moment to label. Play or step to a frame where the face is tracked.");
+    const mid = (a: number[]) => (Math.min(...a) + Math.max(...a)) / 2, half = (a: number[]) => Math.max(4, (Math.max(...a) - Math.min(...a)) / 2 + 3);
+    const ch = mid(hs), cv = mid(vs), wh = half(hs), wv = half(vs);
+    this.setDragMode("region");
+    this.editRegionId = null;
+    this.pendingRegion = { h0: ch - wh, h1: ch + wh, v0: cv - wv, v1: cv + wv };
+    this.renderRegionForm();
+  }
+
+  private setDragMode(m: "highlight" | "region") {
+    this.dragMode = m;
+    const radio = this.root.querySelector<HTMLInputElement>(`input[name="dragmode"][value="${m}"]`);
+    if (radio) radio.checked = true;
+    if (m !== "region") { this.editRegionId = null; this.pendingRegion = null; this.renderRegionForm(); }
   }
 
   private regionEdit(e: Event) {
     const t = e.target as HTMLInputElement;
     const r = this.rec?.regions.find((x) => x.id === t.dataset.id);
     if (!r) return;
+    r.auto = false;
     if (t.dataset.field === "name") r.name = t.value.trim() || r.name;
     if (t.dataset.field === "screen") { r.isScreen = t.checked; if (t.checked) r.colour = SCREEN_COLOUR; }
     if (t.dataset.field && ["h0", "h1", "v0", "v1"].includes(t.dataset.field)) {
@@ -502,6 +600,9 @@ export class App {
     s.driftWindowS = Math.max(0, num("#set-drift") || 0);
     s.minFrames = Math.max(1, Math.round(num("#set-minframes") || 1));
     s.blinkHoldMs = Math.max(0, num("#set-blink") || 0);
+    s.blinkFilter = this.q<HTMLInputElement>("#set-blinkfilter").checked;
+    s.blinkLidPct = Math.min(95, Math.max(20, num("#set-blinkpct") || 70));
+    s.blinkMaxMs = Math.max(100, num("#set-blinkmax") || 400);
     this.saveRec();
     this.recompute();
   }
@@ -868,6 +969,7 @@ export class App {
       timeBrush: this.timeBrush, planeBrush: this.planeBrush, draft: this.planeDraft,
       inset, insetAspect,
       showHeat: this.q<HTMLInputElement>("#show-heat").checked, trailMs: 2000,
+      editable: this.dragMode === "region", selectedRegion: this.editRegionId,
       live: this.prefs.live && this.gazeNow()?.source !== "saved" && this.rec?.kind === "file"
         ? { trail: this.live.trail, point: this.gazeNow()?.source === "live" ? (this.live.last as LivePoint) : null } : null,
     });
@@ -996,9 +1098,13 @@ export class App {
     this.q<HTMLInputElement>("#set-drift").value = String(s.driftWindowS);
     this.q<HTMLInputElement>("#set-minframes").value = String(s.minFrames);
     this.q<HTMLInputElement>("#set-blink").value = String(s.blinkHoldMs);
+    this.q<HTMLInputElement>("#set-blinkfilter").checked = s.blinkFilter;
+    this.q<HTMLInputElement>("#set-blinkpct").value = String(s.blinkLidPct);
+    this.q<HTMLInputElement>("#set-blinkmax").value = String(s.blinkMaxMs);
     this.q("#model-info").innerHTML = m ? `
       <dt>Eye scale, horizontal</dt><dd>${m.kH.toFixed(0)}°/unit, ${m.kHSource}${Number.isFinite(m.rH) ? `; r = ${Math.abs(m.rH).toFixed(2)}` : ""}</dd>
       <dt>Eye scale, vertical</dt><dd>${m.kV.toFixed(0)}°/unit, ${m.kVSource}${Number.isFinite(m.rV) ? `; r = ${Math.abs(m.rV).toFixed(2)}` : ""}</dd>
+      <dt>Blinks removed</dt><dd>${this.rec.settings.blinkFilter ? m.blinksRemoved.toLocaleString() : "off"}</dd>
       <dt>Head direction signs</dt><dd>${m.headSignNote}</dd>
       <dt>Screen centre</dt><dd>${m.screenH.toFixed(0)}° horizontal, ${m.screenV.toFixed(0)}° vertical from the camera</dd>
       <dt>Gaze available</dt><dd>${Math.round(m.validFraction * 100)}% of analysed frames; ${Math.round(m.screenFraction * 100)}% of those near the screen centre</dd>` : "<dt>Model</dt><dd>Not fitted yet.</dd>";
@@ -1092,21 +1198,23 @@ const TEMPLATE = `
           <label class="check"><input type="checkbox" id="show-eyes"> Show tracked eyes on the video</label>
         </div>
         <div id="readout" class="readout" aria-live="off" hidden></div>
+        <div class="row"><button id="label-now">Label where they’re looking now</button><span class="muted small">or press L</span></div>
       </div>
       <div id="capture-panel" class="capture" hidden></div>
       <p class="time-row"><span id="time" class="num big"></span></p>
-      <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · Esc clear highlights</p>
+      <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they’re looking · Esc clear highlights</p>
     </section>
     <section class="plane-col">
       <canvas id="plane" aria-label="Where the student is looking, seen from the camera"></canvas>
       <div class="row plane-tools">
         <span>On the plane:</span>
         <label class="check"><input type="radio" name="dragmode" value="highlight" checked> drag to highlight those times</label>
-        <label class="check"><input type="radio" name="dragmode" value="region"> click a hotspot or drag a box to label it</label>
+        <label class="check"><input type="radio" name="dragmode" value="region"> label and edit regions</label>
         <label class="check"><input type="checkbox" id="show-heat" checked> heatmap</label>
         <button id="fit-plane">Fit view</button>
         <button id="clear-hl">Clear highlights</button>
       </div>
+      <p class="muted small plane-help">In label and edit mode: click a hotspot or drag a box to add a region; click a region to rename or delete it; drag it, or its edges and corners, to move or resize it.</p>
       <div id="region-form" class="row region-form" hidden></div>
     </section>
   </div>
@@ -1117,7 +1225,7 @@ const TEMPLATE = `
     <div class="row">
       <button id="zoom-in">Zoom in</button><button id="zoom-out">Zoom out</button><button id="zoom-scope">Fit segment</button>
       <span class="muted">Click to go to a moment, drag to highlight a stretch, scroll to zoom.</span>
-      <span class="legend"><span class="swatch" style="background:var(--screen)"></span>screen <span class="swatch" style="background:var(--elsewhere)"></span>elsewhere <span class="swatch" style="background:var(--nodata)"></span>no gaze</span>
+      <span class="legend"><span class="swatch" style="background:var(--screen)"></span>screen <span class="swatch" style="background:var(--elsewhere)"></span>elsewhere <span class="swatch" style="background:var(--nodata)"></span>no gaze <span class="swatch blink-key"></span>blink removed</span>
     </div>
   </section>
 
@@ -1149,7 +1257,9 @@ const TEMPLATE = `
         <label>Eye scale, vertical <input id="set-kv" size="5" inputmode="decimal"> °/unit</label>
         <label>Follow posture drift over <input id="set-drift" size="4" inputmode="numeric"> s (0 = off)</label>
         <label>Shortest glance listed <input id="set-minframes" size="3" inputmode="numeric"> frames</label>
-        <label>Hold eye position through blinks up to <input id="set-blink" size="4" inputmode="numeric"> ms</label>
+        <label class="check"><input type="checkbox" id="set-blinkfilter"> Remove blinks from the eye trace</label>
+        <label>A blink is the lids below <input id="set-blinkpct" size="3" inputmode="numeric"> % of usual for at most <input id="set-blinkmax" size="4" inputmode="numeric"> ms</label>
+        <label>Hold the last eye position when the eyes can’t be measured, up to <input id="set-blink" size="4" inputmode="numeric"> ms</label>
       </div>
       <dl id="model-info" class="model-info"></dl>
     </section>

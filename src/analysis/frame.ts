@@ -42,7 +42,9 @@ export class RunBuilder {
     for (const k of FIELDS) this.cols[k].push(values ? values[k] : NaN);
     this.fps.push(fp);
   }
-  finish(): Run {
+  /** end: where this run's coverage stops, if not the end of the interval it was started with. */
+  finish(end?: number): Run {
+    if (end !== undefined) this.interval = { start: this.interval.start, end };
     const n = this.t.length;
     const fp = new Uint8Array(n * FP_SIZE);
     this.fps.forEach((f, i) => fp.set(f, i * FP_SIZE));

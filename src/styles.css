@@ -176,3 +176,5 @@ td { padding: 4px 6px; border-bottom: 1px solid var(--rule); }
 .readout .src { font-size: 12px; color: var(--muted); }
 .readout .src.live { color: var(--live); }
 #volume { width: 80px; vertical-align: middle; }
+.blink-key { background: linear-gradient(var(--ink) 0 3px, var(--screen) 3px); }
+.plane-help { margin: 0 0 6px; }

@@ -219,6 +219,9 @@ export class Detail {
         const x0 = X(g.t[i]), x1 = X(g.t[i] + dt);
         ctx.fillRect(x0, bandY, Math.max(1, x1 - x0), bandH);
       }
+      // Blinks removed by the model: a thin dark line along the top of the band.
+      ctx.fillStyle = cssVar("--ink");
+      for (let i = a; i <= b; i++) if (g.blink[i]) ctx.fillRect(X(g.t[i]), bandY, Math.max(1, X(g.t[i] + dt) - X(g.t[i])), 3);
       if (st.planeBrush) {
         const r = st.planeBrush;
         ctx.fillStyle = cssVar("--hilite");
