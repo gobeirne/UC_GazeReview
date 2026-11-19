@@ -44,6 +44,19 @@ const clock = trackerClock;
 
 const WARMUP_MS = 1000;
 
+/**
+ * Lets the page handle input between frames. A MessageChannel message is used instead of
+ * setTimeout because browsers slow timers in hidden tabs and minimised windows to about
+ * once a second, which would make analysis in a background window crawl.
+ */
+const channel = typeof MessageChannel !== "undefined" ? new MessageChannel() : null;
+const waiting: (() => void)[] = [];
+if (channel) channel.port1.onmessage = () => waiting.shift()?.();
+function yieldToPage(): Promise<void> {
+  if (!channel) return new Promise((r) => setTimeout(r, 0));
+  return new Promise((r) => { waiting.push(r); channel.port2.postMessage(0); });
+}
+
 /** Analysed frames are handed over for saving in pieces of this much video. */
 const CHUNK_MS = 30_000;
 
@@ -109,8 +122,9 @@ export async function analyseGap(
       if (decodeError) throw decodeError;
       if (signal.aborted) throw new DOMException("Analysis stopped", "AbortError");
       const f = queue.shift();
-      if (f) { process(f); if (count % 15 === 0) await new Promise((r) => setTimeout(r, 0)); continue; }
-      await new Promise<void>((r) => { wake = r; setTimeout(r, 50); });
+      if (f) { process(f); if (count % 15 === 0) await yieldToPage(); continue; }
+      // Woken by the decoder's next output (or error); the timeout is only a safety net.
+      await new Promise<void>((r) => { wake = r; setTimeout(r, 250); });
       wake = null;
     }
   };

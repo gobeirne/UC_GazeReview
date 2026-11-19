@@ -62,7 +62,7 @@ The strip across the top of the timeline shows the whole recording: segments abo
 
 The plane is the view from the camera: the video sits at the camera position, the student's right is on the left of the plane and up is up. Each frame's gaze is a point in degrees from the camera.
 
-- The **heatmap** shows where gaze spent time in the current segment (or all of them).
+- The **heatmap** shows where gaze spent time. *Heatmap of* chooses which frames: the segment shown (or all segments), only the stretch highlighted on the timeline, or nothing.
 - The **trail** shows the last 2 s up to the playback position.
 - The dashed **circle** is the centre of the main on-screen cluster found by the model.
 - **Drag** to highlight the times when gaze was inside the box; they are marked along the top of the timeline.
@@ -100,7 +100,15 @@ Space play/pause · ← → one frame (Shift: ten) · N / P next or previous gla
 
 ### Saving and moving work
 
-Everything is saved in this browser automatically. *Export* writes one JSON file per recording (segments, regions, settings and per-frame measurements, no video) and *Import* reads it back, on this or another computer. Clearing the browser's site data deletes saved work, so export anything you need to keep.
+Everything is saved in this browser automatically (IndexedDB), and opening the same video again brings it back. That store belongs to this browser on this computer, and clearing the browser's site data deletes it.
+
+**Saving next to the videos (Chrome and Edge).** *Save to a folder…* links a folder, normally the one holding the exam videos. Each recording is then also kept there as `<video name>.gaze.json`, updated during analysis and after every change. Opening a video picks up its file from the folder if it is newer than this browser's copy, so work carries over to another computer or browser with the folder. The menu beside the button lists the videos in the folder, with ✓ against those that have saved analysis. Browsers ask for permission to the folder again in each new session; the button then reads *Reconnect*. Deleting a recording in the tool doesn't delete its file in the folder.
+
+**Export and Import** write and read the same file by hand, for browsers without folder access or for sending to someone with the video. The export can leave out the 16×12 frame thumbnails, which are only needed to line up later screen captures: the file is then about a third of the size and holds no image-derived data. Treat either version as you would the recording itself.
+
+### Several videos at once
+
+Each video can be open in its own window, and analyses in hidden tabs and minimised windows keep running at full speed. They share the computer's GPU, so two analyses at once each run slower. A video can only be open in one window at a time; the second window says so instead of opening it.
 
 ---
 

@@ -178,3 +178,8 @@ td { padding: 4px 6px; border-bottom: 1px solid var(--rule); }
 #volume { width: 80px; vertical-align: middle; }
 .blink-key { background: linear-gradient(var(--ink) 0 3px, var(--screen) 3px); }
 .plane-help { margin: 0 0 6px; }
+.folder { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.folder select { max-width: 240px; }
+#folder-status.error { color: var(--danger); }
+.export-menu { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 0; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--rule); }
+.export-menu .small { max-width: 70ch; }

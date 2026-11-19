@@ -2,7 +2,7 @@ import type { MediaPipeFaceTracker } from "../tracking/MediaPipeFaceTracker";
 import { fpDistance, Fingerprinter, meanAbsDiff, measure, RunBuilder } from "../analysis/frame";
 import { normalise, type Interval } from "../analysis/intervals";
 import { trackerClock } from "../video/analyse";
-import type { Run } from "../store/types";
+import { FP_SIZE, type Run } from "../store/types";
 
 export interface Crop { x: number; y: number; w: number; h: number }
 
@@ -150,7 +150,7 @@ export interface Alignment {
  * typical and close in absolute terms.
  */
 export function alignCapture(run: Run, stored: Run[], frameIntervalMs: number, searchMs = 8000): Alignment {
-  const refs = stored.filter((r) => r.t.length);
+  const refs = stored.filter((r) => r.t.length && r.fp.length >= r.t.length * FP_SIZE); // imported without thumbnails: can't align
   const cover: Interval[] = normalise(refs.map((r) => ({ start: r.start - searchMs, end: r.end + searchMs })));
   const sample: number[] = [];
   for (let i = 0; i < run.t.length && sample.length < 300; i++) {

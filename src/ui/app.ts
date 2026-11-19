@@ -7,6 +7,7 @@ import { Fingerprinter, measure, shiftRun, splitRun } from "../analysis/frame";
 import { normalise, subtract, totalLength, union, type Interval } from "../analysis/intervals";
 import { alignCapture, ScreenCapture, type Crop } from "../capture/capture";
 import * as db from "../store/db";
+import * as folder from "../store/folder";
 import { DEFAULT_SETTINGS, newId, type Recording, type Region, type Run, type Segment } from "../store/types";
 import { analyseGap, chooseDecoderConfig, fileIdentity, trackerClock } from "../video/analyse";
 import { fileSource, indexWebm, medianFrameInterval, type ByteSource, type WebmIndex } from "../video/webm";
@@ -54,6 +55,10 @@ export class App {
   private lastLiveT = NaN;
   private lastAttemptPh = NaN;
   private prefs = loadPrefs();
+  private lock = new RecordingLock();
+  private sidecarTimer = 0;
+  private sidecarLast = 0;
+  private sidecarError = "";
   private message = "";
 
   private q = <T extends HTMLElement>(sel: string) => this.root.querySelector(sel) as T;
@@ -74,6 +79,7 @@ export class App {
     this.recordings = await db.listRecordings();
     this.renderRecordingList();
     db.requestPersistence();
+    if (folder.folderSupported) { await folder.restoreFolder(); await this.renderFolder(); }
     if (typeof VideoDecoder === "undefined") this.say("This browser cannot decode video frame by frame (WebCodecs). Use a current Chrome, Edge, Firefox or Safari.");
     this.renderAll();
     // Track each frame as it is shown. Pending callbacks are dropped when the source changes,
@@ -110,7 +116,17 @@ export class App {
     fileInput.addEventListener("change", () => { const f = fileInput.files?.[0]; fileInput.value = ""; if (f) this.openFile(f); });
     this.q<HTMLSelectElement>("#rec-select").addEventListener("change", (e) => this.selectRecording((e.target as HTMLSelectElement).value));
     this.q("#start-capture").addEventListener("click", () => this.beginCapture());
-    this.q("#export").addEventListener("click", () => this.exportRec());
+    this.q("#export").addEventListener("click", () => { const m = this.q("#export-menu"); m.hidden = !m.hidden; });
+    this.q("#export-go").addEventListener("click", () => { this.q("#export-menu").hidden = true; this.exportRec(this.q<HTMLInputElement>("#export-thumbs").checked); });
+    this.q("#export-cancel").addEventListener("click", () => { this.q("#export-menu").hidden = true; });
+    this.q("#folder-btn").addEventListener("click", () => this.folderButton());
+    this.q<HTMLSelectElement>("#folder-videos").addEventListener("change", async (e) => {
+      const sel = e.target as HTMLSelectElement;
+      const name = sel.value; sel.value = "";
+      if (!name) return;
+      const v = (await folder.listVideos()).find((x) => x.name === name);
+      if (v) this.openFile(await v.handle.getFile());
+    });
     const importInput = this.q<HTMLInputElement>("#import-input");
     this.q("#import").addEventListener("click", () => importInput.click());
     importInput.addEventListener("change", async () => { const f = importInput.files?.[0]; importInput.value = ""; if (f) this.importRec(await f.text()); });
@@ -165,16 +181,16 @@ export class App {
     this.plane.onRegionDone = (id) => { this.editRegionId = id; this.renderRegionForm(); this.saveRec(); this.recompute(); };
     this.plane.onRegionSelect = (id) => { this.editRegionId = id; this.pendingRegion = null; this.renderRegionForm(); };
     this.q("#label-now").addEventListener("click", () => { this.video.pause(); this.labelLookingNow(); });
-    this.q<HTMLInputElement>("#show-heat").addEventListener("change", () => this.drawCanvases());
+    this.q<HTMLSelectElement>("#heat-scope").addEventListener("change", () => { this.plane.invalidateHeat(); this.drawCanvases(); });
     this.q("#fit-plane").addEventListener("click", () => { this.plane.fitTo(this.gaze); this.drawCanvases(); });
-    this.q("#clear-hl").addEventListener("click", () => { this.planeBrush = null; this.timeBrush = null; this.drawCanvases(); });
+    this.q("#clear-hl").addEventListener("click", () => { this.planeBrush = null; this.timeBrush = null; this.renderHeatScope(); this.drawCanvases(); });
 
     this.overview.onSeek = (t) => this.seek(t);
     this.overview.onWindow = (w) => { this.win = w; this.drawCanvases(); };
     this.overview.onSegment = (id) => this.setScope(id);
     this.detail.onSeek = (t) => this.seek(t);
     this.detail.onDraft = (b) => { this.timeDraft = b; };
-    this.detail.onBrush = (b) => { this.timeBrush = b; };
+    this.detail.onBrush = (b) => { this.timeBrush = b; this.renderHeatScope(); };
     this.detail.onZoom = (w) => { this.win = this.clampWin(w); };
     this.q("#zoom-scope").addEventListener("click", () => { this.win = this.scopeWindow(); });
     this.q("#zoom-in").addEventListener("click", () => this.zoom(0.5));
@@ -235,8 +251,10 @@ export class App {
     this.say(`Reading ${f.name}…`);
     try {
       const id = await fileIdentity(f);
+      if (!(await this.lock.take(id))) return this.say(`${f.name} is already open in another window. Close it there first: two windows analysing the same video would overwrite each other.`);
       const src = fileSource(f);
       const ix = await indexWebm(src, (p) => this.say(`Indexing ${f.name}: ${Math.round(p * 100)}%`));
+      const fromFolder = await this.loadSidecar(f.name, id);
       let rec = await db.getRecording(id);
       if (!rec) {
         rec = {
@@ -254,7 +272,7 @@ export class App {
       await this.loadRec(rec);
       const fps = 1000 / rec.frameIntervalMs;
       this.say(`${f.name}: ${ix.width}×${ix.height}, ${ix.codecId.replace("V_", "")}, about ${fps.toFixed(1)} frames/s, ${fmtTime(ix.durationMs, 0)} long, ${ix.frames.length.toLocaleString()} frames.` +
-        (ix.skippedLaced ? ` ${ix.skippedLaced} laced blocks skipped.` : ""));
+        (ix.skippedLaced ? ` ${ix.skippedLaced} laced blocks skipped.` : "") + (fromFolder ? ` ${fromFolder}` : ""));
     } catch (e) {
       this.say(`Could not open ${f.name}: ${(e as Error).message}`);
     }
@@ -264,6 +282,7 @@ export class App {
     if (!id || this.busy) return;
     const rec = this.recordings.find((r) => r.id === id);
     if (!rec) return;
+    if (!(await this.lock.take(id))) { this.renderRecordingList(); return this.say(`“${rec.name}” is already open in another window. Close it there first.`); }
     this.stopCapture();
     if (this.rec?.id !== id) {
       this.file = null; this.src = null; this.index = null;
@@ -291,6 +310,85 @@ export class App {
     await db.putRecording(this.rec);
     this.recordings = await db.listRecordings();
     this.renderRecordingList();
+    this.scheduleSidecar();
+  }
+
+  // ---------- Saving next to the videos ----------
+
+  /** Writes the recording's file into the linked folder: 2 s after the last change, at most every 15 s. */
+  private scheduleSidecar(now = false) {
+    if (!folder.folderReady() || !this.rec) return;
+    clearTimeout(this.sidecarTimer);
+    const wait = now ? 0 : Math.max(2000, 15000 - (Date.now() - this.sidecarLast));
+    this.sidecarTimer = window.setTimeout(() => this.writeSidecarNow(), wait);
+  }
+
+  private async writeSidecarNow() {
+    const rec = this.rec;
+    if (!rec || !folder.folderReady()) return;
+    this.sidecarLast = Date.now();
+    try {
+      const runs = await db.getRuns(rec.id);
+      await folder.writeSidecar(folder.sidecarName(rec.fileName ?? rec.name), db.exportJson(rec, runs, { thumbnails: true }));
+      this.sidecarError = "";
+    } catch (e) {
+      this.sidecarError = `Could not save to the folder: ${(e as Error).message}`;
+    }
+    this.renderFolder();
+  }
+
+  /**
+   * If the linked folder has a saved file for this video and it is newer than what this
+   * browser has, use it. Returns a note for the status line, or "".
+   */
+  private async loadSidecar(fileName: string, id: string): Promise<string> {
+    if (!folder.folderReady()) return "";
+    const text = await folder.readSidecar(folder.sidecarName(fileName));
+    if (!text) return "";
+    try {
+      const { recording, runs } = db.importJson(text);
+      if (recording.id !== id) return `The folder’s ${folder.sidecarName(fileName)} belongs to a different video with the same name, so it was not used.`;
+      const local = await db.getRecording(id);
+      if (local && local.updatedAt >= recording.updatedAt) return "";
+      if (local) await db.deleteRecording(id);
+      await db.putRecording(recording);
+      await db.putRuns(runs);
+      this.recordings = await db.listRecordings();
+      return `Earlier analysis loaded from ${folder.sidecarName(fileName)} in the folder.`;
+    } catch (e) {
+      return `The folder’s ${folder.sidecarName(fileName)} could not be read (${(e as Error).message}).`;
+    }
+  }
+
+  private async folderButton() {
+    try {
+      if (folder.folderName() && !folder.folderReady()) await folder.reconnectFolder();
+      else await folder.chooseFolder();
+    } catch (e) {
+      if ((e as Error).name !== "AbortError") this.say(`Could not use that folder: ${(e as Error).message}`);
+    }
+    await this.renderFolder();
+    if (folder.folderReady()) {
+      this.say(`Analysis files will be saved in “${folder.folderName()}”, named after each video. Open videos from the list to pick up their saved analysis.`);
+      this.scheduleSidecar(true);
+    }
+  }
+
+  private async renderFolder() {
+    const box = this.q("#folder"), btn = this.q<HTMLButtonElement>("#folder-btn"), sel = this.q<HTMLSelectElement>("#folder-videos");
+    if (!folder.folderSupported) { box.hidden = true; return; }
+    box.hidden = false;
+    const name = folder.folderName(), ready = folder.folderReady();
+    btn.textContent = !name ? "Save to a folder…" : ready ? "Change folder…" : `Reconnect “${name}”`;
+    const status = this.q("#folder-status");
+    status.textContent = this.sidecarError || (ready ? `Saving to “${name}”` + (this.sidecarLast ? `, last ${new Date(this.sidecarLast).toLocaleTimeString()}` : "") : "");
+    status.classList.toggle("error", !!this.sidecarError);
+    sel.hidden = !ready;
+    if (ready) {
+      const vids = await folder.listVideos();
+      sel.innerHTML = `<option value="">Videos in this folder (${vids.length})…</option>` +
+        vids.map((v) => `<option value="${esc(v.name)}">${esc(v.name)}${v.analysed ? " ✓" : ""}</option>`).join("");
+    }
   }
 
   private async renameRec() {
@@ -308,14 +406,15 @@ export class App {
     this.renderRecordingList(); this.renderAll();
   }
 
-  private exportRec() {
+  private exportRec(thumbnails: boolean) {
     if (!this.rec) return;
-    download(`${this.rec.name.replace(/[^\w.-]+/g, "_")}.gaze.json`, db.exportJson(this.rec, this.runs));
+    download(`${this.rec.name.replace(/[^\w.-]+/g, "_")}.gaze.json`, db.exportJson(this.rec, this.runs, { thumbnails }));
   }
 
   private async importRec(text: string) {
     try {
       const { recording, runs } = db.importJson(text);
+      if (recording.id !== this.rec?.id && !(await this.lock.take(recording.id))) return this.say(`“${recording.name}” is open in another window. Close it there before importing.`);
       const existing = await db.getRecording(recording.id);
       if (existing && !confirm(`Replace the saved analysis for “${existing.name}” with the imported one?`)) return;
       if (existing) await db.deleteRecording(existing.id);
@@ -405,6 +504,7 @@ export class App {
       const onChunk = (run: Run) => {
         saving = saving.then(async () => {
           await db.putRuns([run]);
+          this.scheduleSidecar();
           if (this.rec?.id !== recId) return;
           this.runs = await db.getRuns(recId);
           this.recompute();
@@ -423,6 +523,7 @@ export class App {
         }
       } finally {
         await saving;
+        this.scheduleSidecar(true);
       }
       const s = (performance.now() - started) / 1000;
       this.say(Number.isFinite(stoppedAt)
@@ -613,6 +714,7 @@ export class App {
     if (this.busy) return;
     if (!navigator.mediaDevices?.getDisplayMedia) return this.say("This browser cannot capture a window or tab.");
     let rec = this.rec;
+    if (rec?.kind === "capture" && !(await this.lock.take(rec.id))) return this.say(`“${rec.name}” is open in another window.`);
     if (!rec || rec.kind !== "capture") {
       const name = prompt("Name for this screen-capture recording (e.g. student ID and exam)", "");
       if (!name?.trim()) return;
@@ -620,6 +722,7 @@ export class App {
         id: newId("cap"), name: name.trim(), kind: "capture", durationMs: 0, width: 0, height: 0, frameIntervalMs: 1000 / 30,
         segments: [], regions: [], settings: { ...DEFAULT_SETTINGS }, createdAt: Date.now(), updatedAt: Date.now(),
       };
+      await this.lock.take(rec.id);
       await db.putRecording(rec);
       this.recordings = await db.listRecordings();
       this.file = null; this.src = null; this.index = null;
@@ -966,9 +1069,10 @@ export class App {
       this.captureCrop ? this.captureCrop.w / this.captureCrop.h : 4 / 3;
     this.plane.draw({
       gaze: this.gaze, scope: this.scope(), regions: this.rec?.regions ?? [], playhead: ph,
-      timeBrush: this.timeBrush, planeBrush: this.planeBrush, draft: this.planeDraft,
+      // With the heatmap showing the highlighted stretch, its points aren't drawn on top as well.
+      timeBrush: this.q<HTMLSelectElement>("#heat-scope").value === "brush" ? null : this.timeBrush, planeBrush: this.planeBrush, draft: this.planeDraft,
       inset, insetAspect,
-      showHeat: this.q<HTMLInputElement>("#show-heat").checked, trailMs: 2000,
+      ...this.heatState(), trailMs: 2000,
       editable: this.dragMode === "region", selectedRegion: this.editRegionId,
       live: this.prefs.live && this.gazeNow()?.source !== "saved" && this.rec?.kind === "file"
         ? { trail: this.live.trail, point: this.gazeNow()?.source === "live" ? (this.live.last as LivePoint) : null } : null,
@@ -982,6 +1086,24 @@ export class App {
       playhead: ph, timeBrush: this.timeBrush, planeBrush: this.planeBrush, selectedEvent: this.selectedEvent,
     }, this.timeDraft);
     if (this.captureCanvas && this.capture?.stream) this.drawCapturePreview();
+  }
+
+  /** Which frames the heatmap counts: the segment (or all), the highlighted stretch only, or none. */
+  private heatState(): { showHeat: boolean; heatScope: Interval | null; heatHint: string } {
+    const mode = this.q<HTMLSelectElement>("#heat-scope").value;
+    if (mode === "off") return { showHeat: false, heatScope: null, heatHint: "" };
+    if (mode === "brush") {
+      return this.timeBrush
+        ? { showHeat: true, heatScope: this.timeBrush, heatHint: `Heatmap: ${fmtTime(this.timeBrush.start)}–${fmtTime(this.timeBrush.end)}` }
+        : { showHeat: false, heatScope: null, heatHint: "Drag across the timeline to choose the stretch for the heatmap" };
+    }
+    return { showHeat: true, heatScope: this.scope(), heatHint: "" };
+  }
+
+  private renderHeatScope() {
+    this.plane.invalidateHeat();
+    const opt = this.root.querySelector<HTMLOptionElement>('#heat-scope option[value="brush"]');
+    if (opt) opt.textContent = this.timeBrush ? `highlighted stretch (${fmtTime(this.timeBrush.start, 0)}–${fmtTime(this.timeBrush.end, 0)})` : "highlighted stretch";
   }
 
   private drawCapturePreview() {
@@ -1069,7 +1191,19 @@ export class App {
       }).join("") + `</tbody></table>` : `<p class="muted">${this.gaze ? "No glances away from the screen in this view." : "Glances appear here once a segment is analysed."}</p>`;
   }
 
+  private renderLegend() {
+    const regions = this.rec?.regions ?? [];
+    const sw = (c: string, label: string) => `<span class="swatch" style="background:${c}"></span>${esc(label)}`;
+    const named = regions.filter((r) => !r.isScreen).map((r) => sw(r.colour, r.name));
+    const screen = regions.find((r) => r.isScreen);
+    const html = [sw("var(--screen)", screen?.name ?? "screen"), ...named, sw("var(--elsewhere)", "elsewhere"), sw("var(--nodata)", "no gaze"),
+      `<span class="swatch blink-key"></span>blink removed`].join(" ");
+    const el = this.q("#legend");
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
   private renderRegions() {
+    this.renderLegend();
     const box = this.q("#regions");
     if (!this.rec || !this.gaze || !this.labels) { box.innerHTML = `<p class="muted">Regions appear once a segment is analysed.</p>`; return; }
     const sc = this.scope() ?? { start: -Infinity, end: Infinity };
@@ -1134,6 +1268,34 @@ export class App {
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
+/**
+ * Stops the same recording being open in two windows (each would analyse the same parts
+ * and overwrite the other's regions). Uses the Web Locks API, shared by all windows of
+ * this site; browsers without it are not guarded.
+ */
+class RecordingLock {
+  private held: string | null = null;
+  private release: (() => void) | null = null;
+  async take(id: string): Promise<boolean> {
+    if (this.held === id) return true;
+    const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+    if (!locks) return true;
+    const got = await new Promise<boolean>((resolve) => {
+      locks.request(`gaze-review:${id}`, { ifAvailable: true }, (lock) => {
+        if (!lock) { resolve(false); return; }
+        resolve(true);
+        return new Promise<void>((r) => { this.pendingRelease = r; });
+      });
+    });
+    if (!got) return false;
+    this.release?.();
+    this.release = this.pendingRelease;
+    this.held = id;
+    return true;
+  }
+  private pendingRelease: (() => void) | null = null;
+}
+
 interface Prefs { muted: boolean; volume: number; live: boolean; eyes: boolean }
 function loadPrefs(): Prefs {
   const d: Prefs = { muted: false, volume: 1, live: true, eyes: true };
@@ -1161,13 +1323,23 @@ const TEMPLATE = `
     <button id="start-capture">Capture from screen…</button>
     <span class="sep"></span>
     <button id="rename">Rename</button>
-    <button id="export">Export</button>
+    <button id="export" aria-haspopup="true">Export…</button>
     <button id="import">Import</button>
     <input id="import-input" type="file" accept=".json,application/json" hidden>
     <button id="delete-rec" class="danger">Delete</button>
   </div>
+  <span id="folder" class="folder" hidden>
+    <button id="folder-btn">Save to a folder…</button>
+    <select id="folder-videos" aria-label="Videos in the linked folder" hidden></select>
+    <span id="folder-status" class="muted small"></span>
+  </span>
   <span id="tracker-status" class="muted"></span>
 </header>
+<div id="export-menu" class="export-menu" hidden>
+  <label class="check"><input type="checkbox" id="export-thumbs" checked> Include frame thumbnails</label>
+  <span class="muted small">16×12-pixel greyscale thumbnails of every analysed frame. They’re only needed to line up later screen captures with this analysis; leave them out for a smaller file with no image-derived data.</span>
+  <button id="export-go" class="primary">Download</button> <button id="export-cancel">Cancel</button>
+</div>
 <p id="message" class="message" aria-live="polite"></p>
 <div id="busy" class="busy" hidden><span id="busy-label"></span><progress id="busy-bar" max="1" value="0"></progress><button id="stop-busy">Stop</button></div>
 
@@ -1210,7 +1382,7 @@ const TEMPLATE = `
         <span>On the plane:</span>
         <label class="check"><input type="radio" name="dragmode" value="highlight" checked> drag to highlight those times</label>
         <label class="check"><input type="radio" name="dragmode" value="region"> label and edit regions</label>
-        <label class="check"><input type="checkbox" id="show-heat" checked> heatmap</label>
+        <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="off">nothing (off)</option></select></label>
         <button id="fit-plane">Fit view</button>
         <button id="clear-hl">Clear highlights</button>
       </div>
@@ -1225,7 +1397,7 @@ const TEMPLATE = `
     <div class="row">
       <button id="zoom-in">Zoom in</button><button id="zoom-out">Zoom out</button><button id="zoom-scope">Fit segment</button>
       <span class="muted">Click to go to a moment, drag to highlight a stretch, scroll to zoom.</span>
-      <span class="legend"><span class="swatch" style="background:var(--screen)"></span>screen <span class="swatch" style="background:var(--elsewhere)"></span>elsewhere <span class="swatch" style="background:var(--nodata)"></span>no gaze <span class="swatch blink-key"></span>blink removed</span>
+      <span id="legend" class="legend"></span>
     </div>
   </section>
 

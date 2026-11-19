@@ -1,7 +1,7 @@
 import { FIELDS, type Field, type Recording, type Run } from "./types";
 
 const DB_NAME = "uc-gaze-review";
-const VERSION = 1;
+const VERSION = 2;
 
 let dbp: Promise<IDBDatabase> | null = null;
 function db(): Promise<IDBDatabase> {
@@ -11,6 +11,7 @@ function db(): Promise<IDBDatabase> {
       const d = req.result;
       if (!d.objectStoreNames.contains("recordings")) d.createObjectStore("recordings", { keyPath: "id" });
       if (!d.objectStoreNames.contains("runs")) d.createObjectStore("runs", { keyPath: "id" }).createIndex("recId", "recId");
+      if (!d.objectStoreNames.contains("meta")) d.createObjectStore("meta");
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -76,6 +77,18 @@ export async function deleteRecording(id: string): Promise<void> {
   await done(tx);
 }
 
+export async function getMeta<T>(key: string): Promise<T | undefined> {
+  const d = await db();
+  return await wrap(d.transaction("meta").objectStore("meta").get(key)) as T | undefined;
+}
+
+export async function putMeta(key: string, value: unknown): Promise<void> {
+  const d = await db();
+  const tx = d.transaction("meta", "readwrite");
+  if (value === undefined) tx.objectStore("meta").delete(key); else tx.objectStore("meta").put(value, key);
+  await done(tx);
+}
+
 /** Asks the browser not to evict this site's storage under pressure. */
 export async function requestPersistence(): Promise<boolean> {
   try { return (await navigator.storage?.persist?.()) ?? false; } catch { return false; }
@@ -97,19 +110,28 @@ function unb64(s: string): Uint8Array {
 }
 const bytesOf = (a: ArrayBufferView) => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
 
-export function exportJson(rec: Recording, runs: Run[]): string {
+/**
+ * thumbnails: include the 16×12 frame thumbnails. They are only used to line up later
+ * screen captures with this analysis; leaving them out makes the file smaller and keeps
+ * no image-derived data in it.
+ */
+export function exportJson(rec: Recording, runs: Run[], opts: { thumbnails: boolean } = { thumbnails: true }): string {
   return JSON.stringify({
     format: FORMAT,
     version: 1,
     exportedAt: new Date().toISOString(),
+    thumbnails: opts.thumbnails,
     recording: rec,
-    runs: runs.map((r) => ({
-      ...r,
-      t: b64(bytesOf(r.t)),
-      valid: b64(r.valid),
-      fp: b64(r.fp),
-      cols: Object.fromEntries(FIELDS.map((k) => [k, b64(bytesOf(r.cols[k]))])),
-    })),
+    runs: runs.map((r) => {
+      const { fp, ...rest } = r;
+      return {
+        ...rest,
+        t: b64(bytesOf(r.t)),
+        valid: b64(r.valid),
+        ...(opts.thumbnails && fp.length ? { fp: b64(fp) } : {}),
+        cols: Object.fromEntries(FIELDS.map((k) => [k, b64(bytesOf(r.cols[k]))])),
+      };
+    }),
   });
 }
 
@@ -126,7 +148,7 @@ export function importJson(text: string): { recording: Recording; runs: Run[] } 
       ...r,
       t,
       valid: unb64(r.valid as string),
-      fp: unb64(r.fp as string),
+      fp: typeof r.fp === "string" ? unb64(r.fp) : new Uint8Array(0), // exported without thumbnails
       // Fields added after a file was exported come back as "not measured".
       cols: Object.fromEntries(FIELDS.map((k) => [k, typeof cols[k] === "string" ? f32(cols[k]!) : new Float32Array(t.length).fill(NaN)])),
     };

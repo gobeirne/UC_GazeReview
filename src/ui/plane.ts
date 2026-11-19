@@ -19,6 +19,10 @@ export interface PlaneState {
   inset: CanvasImageSource | null;
   insetAspect: number;
   showHeat: boolean;
+  /** Frames counted in the heatmap. */
+  heatScope: Interval | null;
+  /** A note drawn at the top of the plane about what the heatmap shows. */
+  heatHint: string;
   trailMs: number;
   /** Frames tracked live during playback, drawn when there is no saved analysis at the playhead. */
   live: { trail: LivePoint[]; point: LivePoint | null } | null;
@@ -207,12 +211,13 @@ export class GazePlane {
     ctx.font = "12px system-ui, sans-serif";
     ctx.textAlign = "left"; ctx.fillText("Student’s right", X(V.h0) + 6, Y(V.v1) + 16);
     ctx.textAlign = "right"; ctx.fillText("Student’s left", X(V.h1) - 6, Y(V.v1) + 16);
+    if (st.heatHint) { ctx.textAlign = "center"; ctx.fillStyle = ink; ctx.fillText(st.heatHint, (X(V.h0) + X(V.h1)) / 2, Y(V.v1) + 16); ctx.fillStyle = muted; }
 
     const g = st.gaze;
     // Heatmap of the scope.
     if (g && st.showHeat) {
-      const key = `${g.t.length}:${g.t[0]}:${g.h[0]}:${st.scope?.start}:${st.scope?.end}:${V.h0}:${V.h1}:${V.v0}:${V.v1}`;
-      if (!this.heat || this.heat.key !== key) this.heat = buildHeat(g, st.scope, V, key);
+      const key = `${g.t.length}:${g.t[0]}:${g.h[0]}:${st.heatScope?.start}:${st.heatScope?.end}:${V.h0}:${V.h1}:${V.v0}:${V.v1}`;
+      if (!this.heat || this.heat.key !== key) this.heat = buildHeat(g, st.heatScope, V, key);
       const H = this.heat;
       const nx = V.h1 - V.h0, ny = V.v1 - V.v0;
       const lm = Math.log1p(H.max);
