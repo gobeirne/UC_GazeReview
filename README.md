@@ -38,6 +38,18 @@ There is no application server: `dist/` is the whole app.
 
 Each recording is saved in this browser under its own name. Video files are recognised by content, so opening the same file later brings back everything done so far.
 
+### Playing the video
+
+The video plays with sound (*Sound on/off* and the volume slider; the choice is remembered). Speeds from ¼× to 2× and frame stepping are available.
+
+With *Track gaze live during playback* on, every frame shown is run through the face tracker as it plays, analysed or not, so you can compare what you see with where the tool puts the gaze. Under the video a readout gives the region at that moment and how far the gaze is from the screen centre ("12° to their right, 6° down"), and says whether this comes from the saved analysis or was tracked live. On the plane, live positions are drawn as a dashed amber trail with a ring.
+
+Live frames use the model fitted from the saved segments (eye scale, head signs and the nearest drift correction). Before any segment is analysed they use the default eye scale, so positions are approximate. Live frames are never saved; add a segment to keep them.
+
+*Show tracked eyes on the video* draws the eye outlines and iris circles the tracker found on the current frame, as a check that it is following the eyes and not, for example, a reflection in glasses.
+
+On a slow computer live tracking can make playback stutter; turn it off, or use ½× speed.
+
 ### Segments
 
 Add the parts of the exam you want to look at (*From*, *to*, optional label; *Now* takes the current playback time). Each segment is analysed once. A new segment that overlaps earlier ones only analyses the part not already done, and removing a segment deletes the frames no other segment still covers.
@@ -128,7 +140,7 @@ When a capture overlaps frames already analysed, its thumbnails are matched agai
 
 ## Privacy
 
-- Video is read from the file (or the captured window) in the page and is never uploaded, recorded or cached. The service worker caches only the app's own files and the model.
+- Video is read from the file (or the captured window) in the page and is never uploaded, recorded or cached. Live tracking during playback is not saved. The service worker caches only the app's own files and the model.
 - Saved data per recording: segments, regions, settings, per-frame numbers and 16×12 greyscale thumbnails, kept in this browser's IndexedDB until deleted.
 - MediaPipe Tasks sends usage metrics (not images) to `odml.pa.googleapis.com` by default. The page's Content-Security-Policy blocks all network connections except the app's own origin and Google's model host, so those metrics are not sent. The model host is only contacted if the bundled model is missing.
 - No login, analytics or telemetry.
@@ -140,7 +152,7 @@ When a capture overlaps frames already analysed, its thumbnails are matched agai
 | `src/tracking/` | Copied from UC_TFR. `MediaPipeFaceTracker.ts` accepts decoded frames as well as video elements; the others are unchanged. |
 | `src/video/` | WebM index and WebCodecs analysis of a time stretch |
 | `src/capture/` | Screen/window capture, time estimation and alignment |
-| `src/analysis/` | Interval sets, per-frame measurement, gaze model, regions and glances |
+| `src/analysis/` | Interval sets, per-frame measurement, gaze model, live projection, regions and glances |
 | `src/store/` | Data types, IndexedDB storage, export and import |
 | `src/ui/` | App, gaze plane, timeline |
 | `tests/` | Unit tests (synthetic WebM, simulated gaze, capture alignment) |

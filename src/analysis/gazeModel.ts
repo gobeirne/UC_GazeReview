@@ -25,6 +25,9 @@ export interface GazeSeries {
   onScreen: Uint8Array;
   /** Lid opening relative to this student's median (1 = typical; NaN = unknown). */
   lid: Float32Array;
+  /** Drift correction applied to each frame (°), so live frames can be corrected the same way. */
+  dH: Float32Array;
+  dV: Float32Array;
   n: number;
   model: GazeModelInfo;
 }
@@ -115,11 +118,15 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
   }
 
   // Follow slow posture drift using on-screen frames only.
+  const dH = new Float32Array(n), dV = new Float32Array(n);
   if (s.driftWindowS > 0) {
     for (let pass = 0; pass < 2; pass++) {
       const bh = baseline(t, gh, member, s.driftWindowS * 1000, centre.h);
       const bv = baseline(t, gv, member, s.driftWindowS * 1000, centre.v);
-      for (let k = 0; k < n; k++) { gh[k] -= bh[k] - centre.h; gv[k] -= bv[k] - centre.v; }
+      for (let k = 0; k < n; k++) {
+        gh[k] -= bh[k] - centre.h; gv[k] -= bv[k] - centre.v;
+        dH[k] -= bh[k] - centre.h; dV[k] -= bv[k] - centre.v;
+      }
       member = membership(gh, gv, ok, centre, SCREEN_RADIUS);
     }
   }
@@ -132,7 +139,7 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
   let nOk = 0, nMem = 0;
   for (let k = 0; k < n; k++) { nOk += ok[k]; nMem += member[k]; }
   return {
-    t, h: gh, v: gv, ok, breakBefore, onScreen: member, lid, n,
+    t, h: gh, v: gv, ok, breakBefore, onScreen: member, lid, dH, dV, n,
     model: {
       kH, kV, kHSource, kVSource, rH, rV, headSignH, headSignV, headSignNote,
       screenH: centre.h, screenV: centre.v, screenRadius: SCREEN_RADIUS,
@@ -143,7 +150,7 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
   };
 }
 
-function avg(a: number, b: number): number {
+export function avg(a: number, b: number): number {
   const fa = Number.isFinite(a), fb = Number.isFinite(b);
   return fa && fb ? (a + b) / 2 : fa ? a : fb ? b : NaN;
 }

@@ -1,12 +1,14 @@
 import { MediaPipeFaceTracker } from "../tracking/MediaPipeFaceTracker";
-import { classify, dwell, ELSEWHERE, findEvents, NONE, SCREEN, type GazeEvent } from "../analysis/events";
-import { buildGaze, type GazeSeries } from "../analysis/gazeModel";
-import { Fingerprinter, shiftRun, splitRun } from "../analysis/frame";
+import { classify, dwell, ELSEWHERE, findEvents, labelPoint, NONE, SCREEN, type GazeEvent } from "../analysis/events";
+import { buildGaze, indexAt, type GazeSeries } from "../analysis/gazeModel";
+import { LiveGaze, type LivePoint } from "../analysis/live";
+import { LM } from "../tracking/landmarks";
+import { Fingerprinter, measure, shiftRun, splitRun } from "../analysis/frame";
 import { normalise, subtract, totalLength, union, type Interval } from "../analysis/intervals";
 import { alignCapture, ScreenCapture, type Crop } from "../capture/capture";
 import * as db from "../store/db";
 import { DEFAULT_SETTINGS, newId, type Recording, type Region, type Run, type Segment } from "../store/types";
-import { analyseGap, chooseDecoderConfig, fileIdentity } from "../video/analyse";
+import { analyseGap, chooseDecoderConfig, fileIdentity, trackerClock } from "../video/analyse";
 import { fileSource, indexWebm, medianFrameInterval, type ByteSource, type WebmIndex } from "../video/webm";
 import { GazePlane, type Rect } from "./plane";
 import { Detail, Overview } from "./timeline";
@@ -46,6 +48,11 @@ export class App {
   private capturedPlayhead = 0;
   private captureFrame: HTMLCanvasElement | null = null;
   private planeFitted = false;
+  private live = new LiveGaze();
+  private liveLandmarks: { t: number; pts: { x: number; y: number }[] } | null = null;
+  private lastLiveT = NaN;
+  private lastAttemptPh = NaN;
+  private prefs = loadPrefs();
   private message = "";
 
   private q = <T extends HTMLElement>(sel: string) => this.root.querySelector(sel) as T;
@@ -68,6 +75,27 @@ export class App {
     db.requestPersistence();
     if (typeof VideoDecoder === "undefined") this.say("This browser cannot decode video frame by frame (WebCodecs). Use a current Chrome, Edge, Firefox or Safari.");
     this.renderAll();
+    // Track each frame as it is shown. Pending callbacks are dropped when the source changes,
+    // so re-arm whenever a new source loads or playback starts.
+    const v = this.video as HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: (now: number, m: { mediaTime: number }) => void) => number;
+      cancelVideoFrameCallback?: (h: number) => void;
+    };
+    if (v.requestVideoFrameCallback) {
+      let handle = 0;
+      const onFrame = (_now: number, m: { mediaTime: number }) => { handle = v.requestVideoFrameCallback!(onFrame); this.onVideoFrame(m.mediaTime * 1000); };
+      const arm = () => { if (handle) v.cancelVideoFrameCallback?.(handle); handle = v.requestVideoFrameCallback!(onFrame); };
+      for (const ev of ["loadeddata", "play"]) this.video.addEventListener(ev, arm);
+    } else {
+      this.video.addEventListener("timeupdate", () => this.trackCurrentFrame());
+    }
+    this.video.addEventListener("pause", () => this.trackCurrentFrame());
+    this.video.muted = this.prefs.muted;
+    this.video.volume = this.prefs.volume;
+    this.q<HTMLInputElement>("#live-on").checked = this.prefs.live;
+    this.q<HTMLInputElement>("#show-eyes").checked = this.prefs.eyes;
+    this.q<HTMLInputElement>("#volume").value = String(this.prefs.volume);
+    this.renderSound();
     const tick = () => { this.frame(); requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
     new ResizeObserver(() => this.drawCanvases()).observe(this.root);
@@ -89,11 +117,24 @@ export class App {
     this.q("#delete-rec").addEventListener("click", () => this.deleteRec());
 
     this.video.addEventListener("loadedmetadata", () => this.drawCanvases());
-    this.video.addEventListener("seeked", () => this.drawCanvases());
+    this.video.addEventListener("seeked", () => { this.trackCurrentFrame(); this.drawCanvases(); });
     this.q("#play").addEventListener("click", () => this.togglePlay());
     this.q("#back-frame").addEventListener("click", () => this.stepFrames(-1));
     this.q("#fwd-frame").addEventListener("click", () => this.stepFrames(1));
     this.q<HTMLSelectElement>("#rate").addEventListener("change", (e) => { this.video.playbackRate = parseFloat((e.target as HTMLSelectElement).value); });
+    this.q("#sound").addEventListener("click", () => { this.video.muted = !this.video.muted; this.prefs.muted = this.video.muted; savePrefs(this.prefs); this.renderSound(); });
+    this.q<HTMLInputElement>("#volume").addEventListener("input", (e) => {
+      this.video.volume = parseFloat((e.target as HTMLInputElement).value);
+      if (this.video.muted && this.video.volume > 0) this.video.muted = false;
+      this.prefs.volume = this.video.volume; this.prefs.muted = this.video.muted; savePrefs(this.prefs); this.renderSound();
+    });
+    for (const [id, key] of [["#live-on", "live"], ["#show-eyes", "eyes"]] as const) {
+      this.q<HTMLInputElement>(id).addEventListener("change", (e) => {
+        this.prefs[key] = (e.target as HTMLInputElement).checked; savePrefs(this.prefs);
+        if (this.prefs.live || this.prefs.eyes) this.trackCurrentFrame();
+      });
+    }
+    this.video.addEventListener("play", () => { if (this.prefs.live || this.prefs.eyes) this.ensureTracker().catch(() => {}); });
 
     this.plane.onDraft = (r) => { this.planeDraft = r; };
     this.plane.onRect = (r) => {
@@ -221,6 +262,7 @@ export class App {
 
   private async loadRec(rec: Recording) {
     this.rec = rec;
+    this.live.reset(); this.liveLandmarks = null; this.lastLiveT = NaN;
     rec.settings = { ...DEFAULT_SETTINGS, ...rec.settings };
     this.runs = await db.getRuns(rec.id);
     this.scopeSeg = null;
@@ -324,6 +366,7 @@ export class App {
       this.setTrackerStatus("Loading face model…");
       await this.tracker.init("auto", false);
       this.setTrackerStatus(`Face model ready (${this.tracker.delegate})`);
+      if (this.video.paused) setTimeout(() => this.trackCurrentFrame(), 0);
     })().catch((e) => { this.trackerReady = null; this.setTrackerStatus("Face model failed to load"); throw e; });
     return this.trackerReady;
   }
@@ -585,6 +628,121 @@ export class App {
     this.renderCapturePanel();
   }
 
+  // ---------- Live tracking during playback ----------
+
+  /** Runs the face tracker on the frame just shown (not saved). */
+  private onVideoFrame(t: number) {
+    if (!(this.prefs.live || this.prefs.eyes) || this.busy || this.capturing || !this.rec || this.rec.kind !== "file") return;
+    if (!this.tracker.ready) {
+      if (!this.trackerReady) this.ensureTracker().then(() => this.trackCurrentFrame()).catch(() => {});
+      return;
+    }
+    try {
+      if (!Number.isFinite(this.lastLiveT) || t <= this.lastLiveT || t - this.lastLiveT > 500) trackerClock.begin(t);
+      const res = this.tracker.detect(this.video, trackerClock.at(t));
+      this.lastLiveT = t;
+      this.liveLandmarks = res.raw ? { t, pts: res.raw.landmarks } : null;
+      this.live.push(t, measure(res.raw), this.gaze, this.rec.settings);
+    } catch (e) {
+      console.warn("live tracking", e);
+    }
+  }
+
+  /** For a paused video: track the frame currently shown. */
+  private trackCurrentFrame() {
+    if (this.video.src && this.video.readyState >= 2) this.onVideoFrame(this.video.currentTime * 1000);
+  }
+
+  private renderSound() {
+    const b = this.q("#sound");
+    b.textContent = this.video.muted ? "Sound off" : "Sound on";
+    b.setAttribute("aria-pressed", String(!this.video.muted));
+  }
+
+  /** What the gaze is doing at the playhead: from the saved analysis if there is one, otherwise live. */
+  private gazeNow(): { h: number; v: number; label: number; source: "saved" | "live" } | null {
+    const ph = this.playhead(), g = this.gaze, dt = this.rec?.frameIntervalMs ?? 33;
+    if (g && this.labels) {
+      const i = indexAt(g.t, ph);
+      if (i >= 0 && ph - g.t[i] <= 1.5 * dt) {
+        return g.ok[i] ? { h: g.h[i], v: g.v[i], label: this.labels[i], source: "saved" } : null;
+      }
+    }
+    const p = this.live.last;
+    const tol = this.video.paused ? 1.5 * dt + 50 : 500; // live tracking may trail the playhead while playing
+    if (this.prefs.live && p && Math.abs(p.t - ph) <= tol) return { h: p.h, v: p.v, label: labelPoint(p.h, p.v, this.rec?.regions ?? [], g), source: "live" };
+    return null;
+  }
+
+  private renderReadout() {
+    const box = this.q("#readout");
+    if (!this.rec || this.rec.kind !== "file" || !this.video.src) { box.hidden = true; return; }
+    box.hidden = false;
+    const now = this.gazeNow();
+    const ph = this.playhead(), dt = this.rec.frameIntervalMs;
+    let html: string;
+    if (!now) {
+      const analysedHere = !!this.gaze && (() => { const i = indexAt(this.gaze!.t, ph); return i >= 0 && ph - this.gaze!.t[i] <= 1.5 * dt; })();
+      const triedHere = Number.isFinite(this.lastLiveT) && Math.abs(this.lastLiveT - ph) <= 1.5 * dt + 50;
+      const why = analysedHere ? "No gaze in this frame: no face found, or the eyes were closed." :
+        !this.prefs.live ? "This moment isn’t analysed. Turn on live tracking, or add a segment." :
+        !this.tracker.ready ? "Loading the face model…" :
+        triedHere ? "No gaze in this frame: no face found, or the eyes were closed." :
+        !this.video.paused ? "Live tracking can’t keep up at this speed. Try ½× or pause." :
+        "Tracking this frame…";
+      html = `<div class="where muted">–</div><div class="src">${why}</div>`;
+    } else {
+      const regions = this.rec.regions;
+      const r = now.label >= 0 ? regions[now.label] : null;
+      const known = !!this.gaze || regions.length > 0;
+      const name = r ? esc(r.name) : !known ? "Gaze position" : now.label === SCREEN ? "Screen" : "Elsewhere";
+      const colour = r ? r.colour : !known ? "var(--live)" : now.label === SCREEN ? "var(--screen)" : "var(--elsewhere)";
+      const m = this.gaze?.model;
+      const refH = m?.screenH ?? 0, refV = m?.screenV ?? 0;
+      const dh = now.h - refH, dv = now.v - refV;
+      const dir = `${Math.abs(dh).toFixed(0)}° to their ${dh >= 0 ? "left" : "right"}, ${Math.abs(dv).toFixed(0)}° ${dv >= 0 ? "up" : "down"}`;
+      const ref = m ? "from the screen centre" : "from the camera";
+      const src = now.source === "saved" ? "From the saved analysis." :
+        m ? "Tracked live, not saved." : "Tracked live, not saved. Positions are approximate until a segment is analysed.";
+      html = `<div class="where"><span class="swatch" style="background:${colour}"></span>${name}</div>
+        <div class="detail">${dir} ${ref}</div><div class="src ${now.source === "live" ? "live" : ""}">${src}</div>`;
+    }
+    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  }
+
+  /** Eye corners, lids and irises from the live tracker, drawn over the video. */
+  private drawEyeOverlay() {
+    const cv = this.q<HTMLCanvasElement>("#eye-overlay");
+    const ctx = cv.getContext("2d")!;
+    const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) { cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr); }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, r.width, r.height);
+    const L = this.liveLandmarks, vw = this.video.videoWidth, vh = this.video.videoHeight;
+    const tol = this.video.paused ? 1.5 * (this.rec?.frameIntervalMs ?? 33) + 50 : 500;
+    if (!this.prefs.eyes || !L || !vw || Math.abs(L.t - this.playhead()) > tol) return;
+    const s = Math.min(r.width / vw, r.height / vh), ox = (r.width - vw * s) / 2, oy = (r.height - vh * s) / 2;
+    const P = (i: number) => ({ x: ox + L.pts[i].x * vw * s, y: oy + L.pts[i].y * vh * s });
+    ctx.lineWidth = 1.5;
+    for (const eye of [
+      { corners: [LM.rEyeOuter, LM.rEyeInner], lids: [LM.rEyeUpper, LM.rEyeLower], iris: LM.rIrisCentre, ring: [469, 471] },
+      { corners: [LM.lEyeInner, LM.lEyeOuter], lids: [LM.lEyeUpper, LM.lEyeLower], iris: LM.lIrisCentre, ring: [474, 476] },
+    ]) {
+      const [a, b] = eye.corners.map(P), [u, d] = eye.lids.map(P);
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(2 * u.x - (a.x + b.x) / 2, 2 * u.y - (a.y + b.y) / 2, b.x, b.y);
+      ctx.quadraticCurveTo(2 * d.x - (a.x + b.x) / 2, 2 * d.y - (a.y + b.y) / 2, a.x, a.y); ctx.stroke();
+      if (L.pts.length > eye.ring[1]) {
+        const c = P(eye.iris), r1 = P(eye.ring[0]), r2 = P(eye.ring[1]);
+        const rad = Math.max(2, Math.hypot(r1.x - r2.x, r1.y - r2.y) / 2);
+        ctx.strokeStyle = "#f5a524"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(c.x, c.y, rad, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = "#f5a524"; ctx.beginPath(); ctx.arc(c.x, c.y, 1.8, 0, Math.PI * 2); ctx.fill();
+        ctx.lineWidth = 1.5;
+      }
+    }
+  }
+
   // ---------- Playback and scope ----------
 
   private playhead(): number {
@@ -690,6 +848,11 @@ export class App {
     }
     this.q("#time").textContent = fmtTime(ph);
     this.q("#play").textContent = playing ? "Pause" : "Play";
+    if (!playing && (this.prefs.live || this.prefs.eyes) && this.tracker.ready && !this.busy && this.video.readyState >= 2 &&
+        this.lastAttemptPh !== ph) {
+      this.lastAttemptPh = ph;
+      if (!(Math.abs(this.lastLiveT - ph) <= 1)) this.trackCurrentFrame();
+    }
     this.drawCanvases();
   }
 
@@ -705,7 +868,11 @@ export class App {
       timeBrush: this.timeBrush, planeBrush: this.planeBrush, draft: this.planeDraft,
       inset, insetAspect,
       showHeat: this.q<HTMLInputElement>("#show-heat").checked, trailMs: 2000,
+      live: this.prefs.live && this.gazeNow()?.source !== "saved" && this.rec?.kind === "file"
+        ? { trail: this.live.trail, point: this.gazeNow()?.source === "live" ? (this.live.last as LivePoint) : null } : null,
     });
+    this.drawEyeOverlay();
+    this.renderReadout();
     this.overview.draw(Math.max(this.rec?.durationMs ?? 0, this.coverage[this.coverage.length - 1]?.end ?? 0, 60000),
       this.rec?.segments ?? [], this.coverage, ph, this.win, this.scopeSeg);
     this.detail.draw({
@@ -861,6 +1028,13 @@ export class App {
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
+interface Prefs { muted: boolean; volume: number; live: boolean; eyes: boolean }
+function loadPrefs(): Prefs {
+  const d: Prefs = { muted: false, volume: 1, live: true, eyes: true };
+  try { return { ...d, ...JSON.parse(localStorage.getItem("gaze-review-prefs") ?? "{}") }; } catch { return d; }
+}
+function savePrefs(p: Prefs) { try { localStorage.setItem("gaze-review-prefs", JSON.stringify(p)); } catch { /* private mode */ } }
+
 const SCREEN_PRESET = "Laptop screen";
 const REGION_PRESETS = [SCREEN_PRESET, "Phone", "Paper", "Second screen", "Keyboard", "Another person", "Thinking (no object)"];
 
@@ -903,14 +1077,21 @@ const TEMPLATE = `
   <div class="stage">
     <section class="video-col">
       <div id="video-wrap">
-        <div class="video-box"><video id="video" playsinline muted></video><p id="video-placeholder" class="placeholder"></p>
+        <div class="video-box"><video id="video" playsinline></video><canvas id="eye-overlay" aria-hidden="true"></canvas><p id="video-placeholder" class="placeholder"></p>
           <p id="capture-note" class="placeholder" hidden>Screen-capture recording: no video is kept. Clicking a time shows where to go in the exam player.</p></div>
         <div id="video-controls" class="row transport">
           <button id="back-frame" aria-label="Back one frame">◀ frame</button>
           <button id="play" class="primary">Play</button>
           <button id="fwd-frame" aria-label="Forward one frame">frame ▶</button>
           <select id="rate" aria-label="Playback speed"><option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+          <button id="sound" aria-pressed="true">Sound on</button>
+          <input id="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
         </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="live-on"> Track gaze live during playback</label>
+          <label class="check"><input type="checkbox" id="show-eyes"> Show tracked eyes on the video</label>
+        </div>
+        <div id="readout" class="readout" aria-live="off" hidden></div>
       </div>
       <div id="capture-panel" class="capture" hidden></div>
       <p class="time-row"><span id="time" class="num big"></span></p>

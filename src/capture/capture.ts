@@ -1,6 +1,7 @@
 import type { MediaPipeFaceTracker } from "../tracking/MediaPipeFaceTracker";
 import { fpDistance, Fingerprinter, meanAbsDiff, measure, RunBuilder } from "../analysis/frame";
 import { normalise, type Interval } from "../analysis/intervals";
+import { trackerClock } from "../video/analyse";
 import type { Run } from "../store/types";
 
 export interface Crop { x: number; y: number; w: number; h: number }
@@ -37,7 +38,6 @@ export class ScreenCapture {
   private lastWall = 0;
   private videoT = 0;
   private startT = 0;
-  private trackerTs = 0;
   private running = false;
   private recent: number[] = [];
   status: CaptureStatus = { videoT: 0, uniqueFrames: 0, duplicates: 0, faceFrames: 0, sourceFps: 0, longGaps: 0 };
@@ -71,7 +71,7 @@ export class ScreenCapture {
     this.videoT = startT;
     this.lastWall = 0;
     this.prevMid = null;
-    this.trackerTs = Math.round(performance.now()) + 1_000_000;
+    trackerClock.begin(startT);
     this.status = { videoT: startT, uniqueFrames: 0, duplicates: 0, faceFrames: 0, sourceFps: 0, longGaps: 0 };
     this.running = true;
     this.loop();
@@ -104,8 +104,7 @@ export class ScreenCapture {
     this.ctx.drawImage(this.video, c.x, c.y, c.w, c.h, 0, 0, c.w, c.h);
     let values = null;
     try {
-      this.trackerTs = Math.max(this.trackerTs + 1, Math.round(now) + 1_000_000);
-      values = measure(this.tracker.detect(this.canvas, this.trackerTs).raw);
+      values = measure(this.tracker.detect(this.canvas, trackerClock.at(this.videoT)).raw);
     } catch (e) { console.warn("capture tracking", e); }
     this.builder.push(this.videoT, values, this.fpr.fingerprint());
     this.status.uniqueFrames++;

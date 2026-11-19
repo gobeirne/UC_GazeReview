@@ -2,6 +2,7 @@ import type { GazeSeries } from "../analysis/gazeModel";
 import { indexAt } from "../analysis/gazeModel";
 import type { Interval } from "../analysis/intervals";
 import type { Region } from "../store/types";
+import type { LivePoint } from "../analysis/live";
 import { cssVar, fitCanvas } from "./util";
 
 export interface Rect { h0: number; h1: number; v0: number; v1: number }
@@ -19,6 +20,8 @@ export interface PlaneState {
   insetAspect: number;
   showHeat: boolean;
   trailMs: number;
+  /** Frames tracked live during playback, drawn when there is no saved analysis at the playhead. */
+  live: { trail: LivePoint[]; point: LivePoint | null } | null;
 }
 
 /** Camera-centred azimuth/elevation plane. h positive = image right (student's left), v positive = up. */
@@ -212,6 +215,23 @@ export class GazePlane {
           ctx.fillStyle = trace; ctx.strokeStyle = cssVar("--panel"); ctx.lineWidth = 2;
           ctx.beginPath(); ctx.arc(X(g.h[b]), Y(g.v[b]), 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
         }
+      }
+    }
+
+    if (st.live) {
+      const c = cssVar("--live");
+      const tr = st.live.trail.filter((p) => p.t <= st.playhead && p.t > st.playhead - st.trailMs);
+      ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
+      for (let i = 1; i < tr.length; i++) {
+        if (tr[i].t - tr[i - 1].t > 200) continue;
+        ctx.globalAlpha = 0.15 + 0.85 * (1 - (st.playhead - tr[i].t) / st.trailMs);
+        ctx.beginPath(); ctx.moveTo(X(tr[i - 1].h), Y(tr[i - 1].v)); ctx.lineTo(X(tr[i].h), Y(tr[i].v)); ctx.stroke();
+      }
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      const p = st.live.point;
+      if (p) {
+        ctx.strokeStyle = c; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(X(p.h), Y(p.v), 7, 0, Math.PI * 2); ctx.stroke();
       }
     }
 

@@ -26,7 +26,12 @@ export async function chooseDecoderConfig(ix: WebmIndex): Promise<VideoDecoderCo
 
 export interface AnalyseProgress { done: number; total: number; tMs: number }
 
-/** Tracker timestamps must increase across all runs, even when analysis jumps backwards. */
+/**
+ * The face tracker's VIDEO mode needs strictly increasing timestamps whose spacing matches
+ * the real frame spacing. Analysis, live playback tracking and screen capture all share
+ * one tracker, so they share this clock: begin() marks a jump (a new stretch, a seek),
+ * at() maps video time to tracker time within the stretch.
+ */
 class TrackerClock {
   private last = 0;
   private base = 0;
@@ -34,7 +39,8 @@ class TrackerClock {
   begin(videoT: number) { this.base = this.last + 1000; this.t0 = videoT; }
   at(videoT: number) { const ts = Math.max(this.last + 1, Math.round(this.base + (videoT - this.t0))); this.last = ts; return ts; }
 }
-const clock = new TrackerClock();
+export const trackerClock = new TrackerClock();
+const clock = trackerClock;
 
 const WARMUP_MS = 1000;
 

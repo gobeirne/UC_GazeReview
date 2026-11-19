@@ -86,3 +86,13 @@ export function dwell(g: GazeSeries, lab: Int16Array, t0: number, t1: number): M
   for (let k = 0; k < g.n; k++) if (g.t[k] >= t0 && g.t[k] < t1) m.set(lab[k], (m.get(lab[k]) ?? 0) + dt);
   return m;
 }
+
+/** Label for one gaze point (for live playback), using the same rules as classify(). */
+export function labelPoint(h: number, v: number, regions: Region[], g: GazeSeries | null): number {
+  const order = regions.map((r, i) => ({ r, i })).sort((a, b) => Number(a.r.isScreen) - Number(b.r.isScreen));
+  for (const { r, i } of order) {
+    if (h >= Math.min(r.h0, r.h1) && h <= Math.max(r.h0, r.h1) && v >= Math.min(r.v0, r.v1) && v <= Math.max(r.v0, r.v1)) return r.isScreen ? SCREEN : i;
+  }
+  if (regions.some((r) => r.isScreen) || !g) return ELSEWHERE;
+  return Math.hypot(h - g.model.screenH, v - g.model.screenV) <= g.model.screenRadius ? SCREEN : ELSEWHERE;
+}
