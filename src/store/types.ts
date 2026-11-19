@@ -1,0 +1,100 @@
+/**
+ * Everything saved per recording. Video is never stored: only per-frame measurements,
+ * a 16×12 thumbnail fingerprint per frame (for aligning screen captures), and the
+ * reviewer's segments, regions and settings.
+ */
+
+/** Per-frame measurements kept for each analysed frame (NaN = not available). */
+export const FIELDS = [
+  "headH", "headV",          // head direction relative to the face→camera line (°), tracker's sign convention
+  "noseX", "noseY",          // nose within the face outline (geometric), used to fix head sign conventions
+  "bHL", "bHR", "bVL", "bVR", // model gaze blendshapes per eye (unitless); NaN while that eye blinks
+  "iHL", "iHR", "iVL", "iVR", // iris centre along/across the eye-corner line (eye widths); NaN while blinking
+  "blinkL", "blinkR",        // blink blendshape scores 0..1
+  "openL", "openR",          // lid gap / eye width
+  "jaw",                     // jawOpen blendshape 0..1 (mouth movement, for telling speaking from quiet)
+] as const;
+export type Field = (typeof FIELDS)[number];
+
+export const FP_W = 16, FP_H = 12, FP_SIZE = FP_W * FP_H;
+
+export interface Run {
+  id: string;
+  recId: string;
+  /** Interval this run covers (ms). Frames lie in [start, end). */
+  start: number;
+  end: number;
+  /** Times estimated from a screen capture without confirmed alignment. */
+  approx: boolean;
+  t: Float64Array;
+  /** 1 = face tracked in this frame. */
+  valid: Uint8Array;
+  cols: Record<Field, Float32Array>;
+  /** FP_SIZE bytes per frame, normalised greyscale. */
+  fp: Uint8Array;
+  createdAt: number;
+}
+
+export interface Segment {
+  id: string;
+  start: number;
+  end: number;
+  label: string;
+  note: string;
+  /** From a screen capture whose timing could not be confirmed against earlier data. */
+  approx?: boolean;
+  createdAt: number;
+}
+
+export interface Region {
+  id: string;
+  name: string;
+  colour: string;
+  isScreen: boolean;
+  /** Rectangle in display coordinates: h positive = towards the student's left (image right), v positive = up. Degrees. */
+  h0: number; h1: number; v0: number; v1: number;
+}
+
+export interface RecordingSettings {
+  eyeSource: "blend" | "iris";
+  /** Degrees of gaze per unit of eye measure; null = fit automatically. */
+  kH: number | null;
+  kV: number | null;
+  /** Window for following slow posture drift (s); 0 = off. */
+  driftWindowS: number;
+  /** Shortest excursion listed as an event, in frames. */
+  minFrames: number;
+  /** Eye value is held through blinks up to this long (ms). */
+  blinkHoldMs: number;
+}
+
+export const DEFAULT_SETTINGS: RecordingSettings = {
+  eyeSource: "blend",
+  kH: null,
+  kV: null,
+  driftWindowS: 60,
+  minFrames: 2,
+  blinkHoldMs: 300,
+};
+
+export interface Recording {
+  id: string;
+  name: string;
+  kind: "file" | "capture";
+  fileName?: string;
+  fileSize?: number;
+  durationMs: number;
+  width: number;
+  height: number;
+  frameIntervalMs: number;
+  segments: Segment[];
+  regions: Region[];
+  settings: RecordingSettings;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function newId(prefix: string): string {
+  const a = crypto.getRandomValues(new Uint8Array(8));
+  return prefix + "-" + Array.from(a, (x) => x.toString(16).padStart(2, "0")).join("");
+}

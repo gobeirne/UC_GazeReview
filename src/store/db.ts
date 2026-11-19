@@ -1,0 +1,135 @@
+import { FIELDS, type Field, type Recording, type Run } from "./types";
+
+const DB_NAME = "uc-gaze-review";
+const VERSION = 1;
+
+let dbp: Promise<IDBDatabase> | null = null;
+function db(): Promise<IDBDatabase> {
+  dbp ??= new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, VERSION);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains("recordings")) d.createObjectStore("recordings", { keyPath: "id" });
+      if (!d.objectStoreNames.contains("runs")) d.createObjectStore("runs", { keyPath: "id" }).createIndex("recId", "recId");
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbp;
+}
+
+function wrap<T>(r: IDBRequest<T>): Promise<T> {
+  return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+function done(tx: IDBTransaction): Promise<void> {
+  return new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error); });
+}
+
+export async function listRecordings(): Promise<Recording[]> {
+  const d = await db();
+  const all = await wrap(d.transaction("recordings").objectStore("recordings").getAll()) as Recording[];
+  return all.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function getRecording(id: string): Promise<Recording | undefined> {
+  const d = await db();
+  return await wrap(d.transaction("recordings").objectStore("recordings").get(id)) as Recording | undefined;
+}
+
+export async function putRecording(r: Recording): Promise<void> {
+  const d = await db();
+  r.updatedAt = Date.now();
+  const tx = d.transaction("recordings", "readwrite");
+  tx.objectStore("recordings").put(r);
+  await done(tx);
+}
+
+export async function getRuns(recId: string): Promise<Run[]> {
+  const d = await db();
+  const runs = await wrap(d.transaction("runs").objectStore("runs").index("recId").getAll(recId)) as Run[];
+  for (const r of runs) for (const k of FIELDS) r.cols[k] ??= new Float32Array(r.t.length).fill(NaN);
+  return runs.sort((a, b) => a.start - b.start);
+}
+
+export async function putRuns(runs: Run[]): Promise<void> {
+  if (!runs.length) return;
+  const d = await db();
+  const tx = d.transaction("runs", "readwrite");
+  for (const r of runs) tx.objectStore("runs").put(r);
+  await done(tx);
+}
+
+export async function deleteRuns(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const d = await db();
+  const tx = d.transaction("runs", "readwrite");
+  for (const id of ids) tx.objectStore("runs").delete(id);
+  await done(tx);
+}
+
+export async function deleteRecording(id: string): Promise<void> {
+  const runs = await getRuns(id);
+  await deleteRuns(runs.map((r) => r.id));
+  const d = await db();
+  const tx = d.transaction("recordings", "readwrite");
+  tx.objectStore("recordings").delete(id);
+  await done(tx);
+}
+
+/** Asks the browser not to evict this site's storage under pressure. */
+export async function requestPersistence(): Promise<boolean> {
+  try { return (await navigator.storage?.persist?.()) ?? false; } catch { return false; }
+}
+
+// ---- Export / import: one JSON file per recording, no video ----
+
+const FORMAT = "uc-gaze-review";
+
+function b64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function unb64(s: string): Uint8Array {
+  const bin = atob(s); const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+const bytesOf = (a: ArrayBufferView) => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
+
+export function exportJson(rec: Recording, runs: Run[]): string {
+  return JSON.stringify({
+    format: FORMAT,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    recording: rec,
+    runs: runs.map((r) => ({
+      ...r,
+      t: b64(bytesOf(r.t)),
+      valid: b64(r.valid),
+      fp: b64(r.fp),
+      cols: Object.fromEntries(FIELDS.map((k) => [k, b64(bytesOf(r.cols[k]))])),
+    })),
+  });
+}
+
+export function importJson(text: string): { recording: Recording; runs: Run[] } {
+  const o = JSON.parse(text);
+  if (o?.format !== FORMAT) throw new Error("This is not a gaze review export file.");
+  if (o.version !== 1) throw new Error(`Unsupported export version ${o.version}.`);
+  const f32 = (s: string) => { const b = unb64(s); return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)); };
+  const f64 = (s: string) => { const b = unb64(s); return new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)); };
+  const runs: Run[] = o.runs.map((r: Record<string, unknown>) => {
+    const t = f64(r.t as string);
+    const cols = r.cols as Partial<Record<Field, string>>;
+    return {
+      ...r,
+      t,
+      valid: unb64(r.valid as string),
+      fp: unb64(r.fp as string),
+      // Fields added after a file was exported come back as "not measured".
+      cols: Object.fromEntries(FIELDS.map((k) => [k, typeof cols[k] === "string" ? f32(cols[k]!) : new Float32Array(t.length).fill(NaN)])),
+    };
+  });
+  return { recording: o.recording as Recording, runs };
+}
