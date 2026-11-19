@@ -76,6 +76,7 @@ export class App {
     this.overview = new Overview(this.q("#overview"));
     this.detail = new Detail(this.q("#detail"));
     this.wire();
+    db.setDbMessageHandler((m) => this.say(m));
     this.recordings = await db.listRecordings();
     this.renderRecordingList();
     db.requestPersistence();

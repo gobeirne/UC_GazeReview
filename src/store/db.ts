@@ -4,6 +4,9 @@ const DB_NAME = "uc-gaze-review";
 const VERSION = 2;
 
 let dbp: Promise<IDBDatabase> | null = null;
+/** Set by the app to show storage messages. */
+export let onDbBlocked: ((message: string) => void) | null = null;
+export function setDbMessageHandler(f: (message: string) => void) { onDbBlocked = f; }
 function db(): Promise<IDBDatabase> {
   dbp ??= new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, VERSION);
@@ -13,8 +16,15 @@ function db(): Promise<IDBDatabase> {
       if (!d.objectStoreNames.contains("runs")) d.createObjectStore("runs", { keyPath: "id" }).createIndex("recId", "recId");
       if (!d.objectStoreNames.contains("meta")) d.createObjectStore("meta");
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const d = req.result;
+      // Let a newer version of the app in another window upgrade the database.
+      d.onversionchange = () => { d.close(); dbp = null; onDbBlocked?.("This tool was updated in another window. Reload this window to keep working."); };
+      resolve(d);
+    };
     req.onerror = () => reject(req.error);
+    // An older version open in another window is holding the database.
+    req.onblocked = () => onDbBlocked?.("Close any other windows of this tool (they’re running an older version) so saved work can be updated.");
   });
   return dbp;
 }
