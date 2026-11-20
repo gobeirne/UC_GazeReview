@@ -688,7 +688,6 @@ export class App {
     if (!this.pendingRegion && !editing) { f.hidden = true; f.innerHTML = ""; return; }
     f.hidden = false;
     const n = (this.rec?.regions.filter((r) => !r.isScreen).length ?? 0) + 1;
-    const otherScreen = this.rec?.regions.some((r) => r.isScreen && r.id !== editing?.id);
     const current = editing?.name ?? `Region ${n}`;
     f.innerHTML = `<span>${editing ? "Edit region" : "What is it?"}</span>
       ${REGION_PRESETS.map((p) => `<button type="button" class="chip ${p === current ? "on" : ""}" data-preset="${esc(p)}">${esc(p)}</button>`).join("")}
@@ -702,7 +701,7 @@ export class App {
     if (!editing) { name.focus(); name.select(); }
     f.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((b) => b.addEventListener("click", () => {
       name.value = b.dataset.preset!;
-      this.q<HTMLInputElement>("#rf-screen").checked = b.dataset.preset === SCREEN_PRESET && !otherScreen;
+      this.q<HTMLInputElement>("#rf-screen").checked = b.dataset.preset === SCREEN_PRESET;
       f.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c === b));
     }));
     const save = () => {
@@ -1388,9 +1387,10 @@ export class App {
     if (!this.rec || !this.gaze || !this.labels) { box.innerHTML = `<p class="muted">Regions appear once a segment is analysed.</p>`; return; }
     const sc = this.scope() ?? { start: -Infinity, end: Infinity };
     const d = dwell(this.gaze, this.labels, sc.start, sc.end);
+    const warn = screenWarning(this.rec.regions);
     const total = [...d.entries()].filter(([k]) => k !== NONE).reduce((s, [, v]) => s + v, 0) || 1;
     const pct = (k: number) => `${Math.round((100 * (d.get(k) ?? 0)) / total)}%`;
-    box.innerHTML = `<table><thead><tr><th></th><th>Name</th><th>Screen</th><th>Time</th><th class="coords">Extent (°)</th><th></th></tr></thead><tbody>` +
+    box.innerHTML = (warn ? `<p class="warn-line">${esc(warn)}</p>` : "") + `<table><thead><tr><th></th><th>Name</th><th>Screen</th><th>Time</th><th class="coords">Extent (°)</th><th></th></tr></thead><tbody>` +
       this.rec.regions.map((r, i) => `<tr>
         <td><span class="swatch" style="background:${r.colour}"></span></td>
         <td><input data-id="${r.id}" data-field="name" value="${esc(r.name)}" size="12" list="region-names" aria-label="Region name"></td>
@@ -1506,6 +1506,20 @@ function loadPrefs(): Prefs {
 function savePrefs(p: Prefs) { try { localStorage.setItem("gaze-review-prefs", JSON.stringify(p)); } catch { /* private mode */ } }
 
 const SCREEN_PRESET = "Laptop screen";
+
+/**
+ * Looks are runs of frames away from the screen, so they only make sense if the screen is
+ * a screen region. Returns a warning when regions exist but none is marked as the screen, or a
+ * region named as a screen isn't marked.
+ */
+export function screenWarning(regions: Region[]): string {
+  if (!regions.length) return "";
+  const unmarked = regions.filter((r) => !r.isScreen && /screen|laptop|monitor/i.test(r.name) && !/second/i.test(r.name));
+  if (!regions.some((r) => r.isScreen))
+    return `No region is marked as the screen, so time on the screen is being counted as looks away${unmarked.length ? ` (to “${unmarked[0].name}”)` : ""}. Tick “Screen” for the screen region.`;
+  if (unmarked.length) return `“${unmarked[0].name}” isn’t marked as a screen, so looks to it count as looks away. Tick “Screen” if it is one.`;
+  return "";
+}
 const REGION_PRESETS = [SCREEN_PRESET, "Phone", "Paper", "Second screen", "Keyboard", "Another person", "Thinking (no object)"];
 
 function coordInputs(r: Region): string {

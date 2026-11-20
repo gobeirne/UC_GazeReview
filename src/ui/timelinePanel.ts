@@ -168,6 +168,7 @@ export class TimelinePanel {
     const rec = this.host.rec();
     const { gaze, labels, glances, regions, coverage } = this.host.analysis();
     if (!rec?.timeline || !this.synced() || !gaze || !labels) { this.host.say("Analyse the video and line up the event timeline first."); return null; }
+    if (!regions.some((r) => r.isScreen)) { this.host.say("No region is marked as the screen, so looks can’t be counted properly. Tick “Screen” for the screen region in the Regions panel, then export again."); return null; }
     const evs = rec.timeline.data.events;
     const times = evs.map((e) => this.videoTime(e));
     const looks = glances.filter((g) => this.region === "any" || String(g.region) === this.region).map((g) => g.start);
@@ -342,6 +343,12 @@ export class TimelinePanel {
     const table = this.box.querySelector(".tl-table");
     if (table) table.innerHTML = `<table><thead><tr><th>Video</th><th>Clock</th><th>Item</th><th>Saved</th><th>Change</th><th>Last look away before</th></tr></thead><tbody>${rows}</tbody></table>`;
     if (!synced || !gaze) { this.drawHist(null); return; }
+    if (regions.length && !regions.some((r) => r.isScreen)) {
+      this.drawHist(null);
+      const note = this.box.querySelector("#tl-hist-note");
+      if (note) note.innerHTML = `<span class="warn-line">No region is marked as the screen, so looks can’t be counted. Tick “Screen” for the screen region in the Regions panel.</span>`;
+      return;
+    }
     this.drawHist(periEvent(evs.map((e) => this.videoTime(e)), looks, coverage, dt));
   }
 

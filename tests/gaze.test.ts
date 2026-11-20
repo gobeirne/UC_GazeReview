@@ -120,3 +120,14 @@ describe("distance correction", () => {
     expect(Math.abs(mean(ev2.filter((e) => e.start >= (n / 2) * 33.3).map((e) => e.peakH)) - mean(ev2.filter((e) => e.start < (n / 2) * 33.3).map((e) => e.peakH)))).toBeGreaterThan(15);
   });
 });
+
+describe("screen region check", () => {
+  test("warns when the screen region isn't marked as the screen", async () => {
+    const { screenWarning } = await import("../src/ui/app");
+    const r = (name: string, isScreen: boolean) => ({ id: name, name, colour: "#000", isScreen, h0: 0, h1: 1, v0: 0, v1: 1 });
+    expect(screenWarning([r("Laptop screen", false), r("Phone", false)])).toMatch(/No region is marked as the screen.*Laptop screen/);
+    expect(screenWarning([r("Screen", true), r("Laptop screen", false)])).toMatch(/isn’t marked as a screen/);
+    expect(screenWarning([r("Laptop screen", true), r("Phone", false), r("Second screen", false)])).toBe("");
+    expect(screenWarning([])).toBe("");
+  });
+});
