@@ -1,10 +1,15 @@
+import { AFTER, BEFORE, BIN, JUST_BEFORE, median, periEvent, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
 import type { GazeEvent } from "../analysis/events";
 import type { GazeSeries } from "../analysis/gazeModel";
 import { contains, type Interval } from "../analysis/intervals";
 import type { Recording, Region } from "../store/types";
 import { answerLabel, checkTimeline, clockMs, clockStamp, previousAnswer, type StoredTimeline, type TimelineEvent } from "../timeline/eventTimeline";
 import { looksLikeHtml, parseMoodleReview } from "../timeline/moodleReview";
-import { cssVar, esc, fitCanvas, fmtTime } from "./util";
+import { cssVar, download, downloadBlob, esc, fitCanvas, fmtTime } from "./util";
+import { dwell, ELSEWHERE, SCREEN } from "../analysis/events";
+import { totalLength } from "../analysis/intervals";
+import { drawFigure } from "../report/figure";
+import { buildCsv, buildReportHtml, figureCaption, type EventRow, type ReportData } from "../report/report";
 
 export interface TimelineHost {
   rec(): Recording | null;
@@ -12,15 +17,15 @@ export interface TimelineHost {
   playhead(): number;
   seek(t: number): void;
   pause(): void;
-  analysis(): { gaze: GazeSeries | null; glances: GazeEvent[]; regions: Region[]; coverage: Interval[] };
+  analysis(): { gaze: GazeSeries | null; labels: Int16Array | null; glances: GazeEvent[]; regions: Region[]; coverage: Interval[] };
+  /** The gaze plane's current view, for the figure. */
+  planeView(): { h0: number; h1: number; v0: number; v1: number };
   say(s: string): void;
   redraw(): void;
 }
 
 export interface TimelineMark { t: number; label: string; kind: TimelineEvent["change_type"]; selected: boolean }
 
-/** Window around each event for the histogram (ms) and its bin width. */
-const BEFORE = 60_000, AFTER = 10_000, BIN = 5_000, SHUFFLES = 500;
 
 /**
  * The event timeline panel: importing a timeline, setting how it lines up with the video,
@@ -129,6 +134,7 @@ export class TimelinePanel {
       if (Number.isFinite(s)) await this.setStart(clockStamp(s + Number(el.dataset.ms)), "adjusted by hand");
     }
     if (act === "use-file-date" && rec.fileDateUtcMs) await this.setStart(localStamp(rec.fileDateUtcMs), "video file’s date (unconfirmed)");
+    if (act === "export-figure" || act === "export-report" || act === "export-csv") this.exportReport(act);
     if (act === "use-timeline-start" && rec.timeline) await this.setStart(rec.timeline.data.attempt.started, "assumed to start with the timeline");
     if (act === "line-up") {
       const i = parseInt(this.box.querySelector<HTMLSelectElement>("#tl-lineup")?.value ?? "-1", 10);
@@ -154,6 +160,69 @@ export class TimelinePanel {
     }
     if (t.id === "tl-order") this.dateOrder = t.value as "dmy" | "mdy";
     if (t.id === "tl-region") { this.region = t.value; this.renderAnalysis(); }
+  }
+
+  // ---------- Exports ----------
+
+  private reportData(): ReportData | null {
+    const rec = this.host.rec();
+    const { gaze, labels, glances, regions, coverage } = this.host.analysis();
+    if (!rec?.timeline || !this.synced() || !gaze || !labels) { this.host.say("Analyse the video and line up the event timeline first."); return null; }
+    const evs = rec.timeline.data.events;
+    const times = evs.map((e) => this.videoTime(e));
+    const looks = glances.filter((g) => this.region === "any" || String(g.region) === this.region).map((g) => g.start);
+    const peri = periEvent(times, looks, coverage, rec.frameIntervalMs);
+    if (!peri.events) { this.host.say("No saved responses have the minute before them analysed yet, so there’s nothing to report."); return null; }
+    const target = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
+    const d = dwell(gaze, labels, -Infinity, Infinity);
+    const ok = (() => { let n = 0; for (let k = 0; k < gaze.n; k++) n += gaze.ok[k]; return n; })();
+    const named = regions.map((r, i) => ({ r, i })).filter(({ r }) => !r.isScreen);
+    const rows: EventRow[] = evs.map((e, i) => {
+      const t = times[i];
+      const prev = previousAnswer(evs, i);
+      const analysed = coverage.some((c) => t - BEFORE >= c.start - rec.frameIntervalMs && t <= c.end + rec.frameIntervalMs);
+      const lastLook: Record<string, number | null> = {};
+      for (const { r, i: ri } of named) {
+        let best: number | null = null;
+        for (const g of glances) if (g.region === ri && g.start <= t && g.start >= t - BEFORE) best = best === null ? t - g.start : Math.min(best, t - g.start);
+        lastLook[r.name] = best;
+      }
+      const change = e.change_type === "revision" ? `${prev ? answerLabel(prev, 20) : "?"} → ${answerLabel(e, 20)}` : e.change_type === "resave" ? "same again" : "first";
+      return { event: e, videoMs: t, change, lastLook, analysed };
+    });
+    const usedEvents = peri.used.map((i) => evs[i]);
+    const caption = figureCaption(target, peri);
+    const fig = drawFigure({
+      title: `Looks to ${target} around saved responses`,
+      subtitle: `${rec.name} · ${peri.events} responses with the minute before analysed · ${(totalLength(coverage) / 60000).toFixed(1)} min of video analysed`,
+      target, peri,
+      rowLabels: usedEvents.map((e) => `Q${e.question_number}`),
+      rowChanged: usedEvents.map((e) => e.change_type === "revision"),
+      gaze, view: this.host.planeView(), regions, caption,
+      regionStats: [
+        ...regions.map((r, i) => ({ name: r.name, colour: r.colour, looks: r.isScreen ? null : glances.filter((g) => g.region === i).length, share: (d.get(r.isScreen ? SCREEN : i) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) })),
+        { name: "Elsewhere", colour: "#e07b00", looks: glances.filter((g) => g.region === ELSEWHERE).length, share: (d.get(ELSEWHERE) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) },
+      ],
+    });
+    return {
+      rec, model: gaze.model, analysedMs: totalLength(coverage), gazeMs: ok * rec.frameIntervalMs,
+      regions: regions.map((r, i) => ({ name: r.name, colour: r.colour, isScreen: r.isScreen, looks: glances.filter((g) => g.region === i).length, timeMs: d.get(r.isScreen ? SCREEN : i) ?? 0 })),
+      unlabelledLooks: glances.filter((g) => g.region === ELSEWHERE).length,
+      target, peri, rows,
+      includeText: this.box.querySelector<HTMLInputElement>("#tl-include-text")?.checked ?? false,
+      figurePng: fig.toDataURL("image/png"), caption,
+      // Kept for the PNG export.
+      ...({ _canvas: fig } as object),
+    } as ReportData;
+  }
+
+  private exportReport(kind: string) {
+    const d = this.reportData();
+    if (!d) return;
+    const base = d.rec.name.replace(/[^\w.-]+/g, "_");
+    if (kind === "export-figure") (d as unknown as { _canvas: HTMLCanvasElement })._canvas.toBlob((b) => b && downloadBlob(`${base}-looks-around-responses.png`, b), "image/png");
+    if (kind === "export-report") download(`${base}-gaze-report.html`, buildReportHtml(d), "text/html");
+    if (kind === "export-csv") download(`${base}-responses.csv`, buildCsv(d), "text/csv");
   }
 
   select(i: number) {
@@ -221,6 +290,12 @@ export class TimelinePanel {
         <div class="row small"><label>Count looks to <select id="tl-region"></select></label></div>
         <canvas id="tl-hist" aria-label="Looks away before and after events"></canvas>
         <p id="tl-hist-note" class="small"></p>
+        <div class="row">
+          <button data-act="export-figure">Export figure (PNG)</button>
+          <button data-act="export-report">Export report (HTML)</button>
+          <button data-act="export-csv">Export responses (CSV)</button>
+          <label class="check small"><input type="checkbox" id="tl-include-text"> Include item wording and responses</label>
+        </div>
       </div>
       <div class="tl-table"></div>`;
     this.renderAnalysis();
@@ -299,60 +374,11 @@ export class TimelinePanel {
     for (let s = -BEFORE; s <= AFTER; s += 10_000) ctx.fillText(`${s / 1000} s`, X((s + BEFORE) / BIN), H - 6);
     ctx.textAlign = "right";
     ctx.fillText(String(max), L - 6, T + 8); ctx.fillText("0", L - 6, B);
-    const last = BEFORE / BIN - 2; // the two bins in the 10 s before
-    const obs = h.observed[last] + h.observed[last + 1];
-    const exp = h.mean[last] + h.mean[last + 1];
-    const lo = h.sumLo, hi = h.sumHi;
-    note.innerHTML = `Bars: looks away starting in each 5 s bin, around ${h.events} event${h.events === 1 ? "" : "s"} in analysed parts. Line and band: the same looks if the events had fallen at random times in the analysed video (mean and 95% range, ${SHUFFLES} shuffles). In the 10 s before events: ${obs} looks; ${exp.toFixed(1)} expected by chance (95% range ${lo}–${hi}).`;
+    const lat = median(h.latencies);
+    note.innerHTML = `<strong>${h.eventsWithLook} of ${h.events} events</strong> had a look in the ${JUST_BEFORE / 1000} s before; with the events at random times in the analysed video, ${h.eventsWithLookMean.toFixed(1)} on average, and ${pText(h)}.` +
+      (h.latencies.length ? ` Median time from the last look to the event: ${(lat / 1000).toFixed(1)} s.` : "") +
+      `<br><span class="muted">Bars: looks starting in each 5 s bin. Line and band: the same looks around randomly placed events (mean and 95% range, ${SHUFFLES} placements). Counting looks rather than events (bursts count several times): ${h.looksBefore} in the ${JUST_BEFORE / 1000} s before, chance range ${h.sumLo}–${h.sumHi}.</span>`;
   }
-}
-
-interface PeriResult { events: number; observed: number[]; mean: number[]; lo: number[]; hi: number[]; sumLo: number; sumHi: number }
-
-/**
- * Counts look onsets in 5 s bins from 60 s before to 10 s after each event, for events whose
- * whole window was analysed, and compares with the same number of events placed at random
- * in the analysed video (windows also fully analysed).
- */
-export function periEvent(eventTimes: number[], looks: number[], coverage: Interval[], frameMs: number): PeriResult {
-  const nb = (BEFORE + AFTER) / BIN;
-  const inside = (t: number) => coverage.some((c) => t - BEFORE >= c.start - frameMs && t + AFTER <= c.end + frameMs);
-  const evs = eventTimes.filter((t) => Number.isFinite(t) && inside(t));
-  const count = (times: number[]) => {
-    const h = new Array(nb).fill(0);
-    for (const t of times) {
-      for (const l of looks) {
-        const d = l - t + BEFORE;
-        if (d >= 0 && d < BEFORE + AFTER) h[Math.floor(d / BIN)]++;
-      }
-    }
-    return h;
-  };
-  const observed = count(evs);
-  // Places where a window fits entirely inside analysed video.
-  const spans = coverage.map((c) => ({ a: c.start + BEFORE, b: c.end - AFTER })).filter((s) => s.b > s.a);
-  const total = spans.reduce((s, x) => s + (x.b - x.a), 0);
-  const runs: number[][] = [];
-  const sums: number[] = [];
-  let seed = 12345;
-  const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
-  if (evs.length && total > 0) {
-    for (let k = 0; k < SHUFFLES; k++) {
-      const ts = evs.map(() => {
-        let x = rnd() * total;
-        for (const s of spans) { const len = s.b - s.a; if (x < len) return s.a + x; x -= len; }
-        return spans[spans.length - 1].b;
-      });
-      const h = count(ts);
-      runs.push(h);
-      sums.push(h[nb - AFTER / BIN - 2] + h[nb - AFTER / BIN - 1]);
-    }
-  }
-  const pct = (a: number[], p: number) => { const s = a.slice().sort((x, y) => x - y); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : 0; };
-  const mean = observed.map((_, b) => (runs.length ? runs.reduce((s, r) => s + r[b], 0) / runs.length : 0));
-  const lo = observed.map((_, b) => pct(runs.map((r) => r[b]), 0.025));
-  const hi = observed.map((_, b) => pct(runs.map((r) => r[b]), 0.975));
-  return { events: evs.length, observed, mean, lo, hi, sumLo: pct(sums, 0.025), sumHi: pct(sums, 0.975) };
 }
 
 /** UTC ms → wall-clock stamp in this computer's time zone. */

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { timelineExample } from "./fixtures/timelineExample";
 import { answerLabel, checkTimeline, clockMs, previousAnswer } from "../src/timeline/eventTimeline";
-import { periEvent } from "../src/ui/timelinePanel";
+import { periEvent } from "../src/analysis/periEvent";
 
 const example = () => JSON.parse(JSON.stringify(timelineExample));
 
@@ -54,5 +54,30 @@ describe("looks around events", () => {
   test("leaves out events whose window isn't analysed", () => {
     const r = periEvent([30_000, 500_000], [], [{ start: 0, end: 600_000 }], 33);
     expect(r.events).toBe(1);
+  });
+});
+
+describe("event-based test", () => {
+  test("counts responses with a look just before, robust to bursts", async () => {
+    const { periEvent: pe } = await import("../src/analysis/periEvent");
+    const coverage = [{ start: 0, end: 3_600_000 }];
+    const events = Array.from({ length: 35 }, (_, i) => 120_000 + i * 95_000);
+    // 10 of the 35 responses have a burst of 3 looks 4–6 s before; plus a few unrelated looks.
+    const looks = [...events.slice(0, 10).flatMap((t) => [t - 6000, t - 5000, t - 4000]), 450_000, 1_450_000, 2_950_000];
+    const r = pe(events, looks, coverage, 33);
+    expect(r.events).toBe(35);
+    expect(r.eventsWithLook).toBe(10);
+    expect(r.looksBefore).toBe(30);
+    expect(r.p).toBeLessThan(0.01);
+    expect(r.latencies.every((x) => x === 4000)).toBe(true);
+    expect(r.raster.length).toBe(35);
+    expect(r.raster[0]).toEqual([-6000, -5000, -4000]);
+  });
+  test("no relation gives an unremarkable p", async () => {
+    const { periEvent: pe } = await import("../src/analysis/periEvent");
+    const coverage = [{ start: 0, end: 3_600_000 }];
+    const events = Array.from({ length: 35 }, (_, i) => 120_000 + i * 95_000);
+    const looks = Array.from({ length: 60 }, (_, i) => 70_000 + i * 58_731);
+    expect(pe(events, looks, coverage, 33).p).toBeGreaterThan(0.05);
   });
 });

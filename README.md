@@ -113,6 +113,16 @@ The *Event timeline* panel attaches timestamped events to the recording and show
 - The most recent event in the readout under the video during playback.
 - *Looks away around events*: looks away starting in each 5 s bin from 60 s before to 10 s after each event, for events whose window has been analysed. A line and band show the same looks with the events placed at random in the analysed video (mean and 95% range of 500 shuffles), so it shows whether looks cluster before events more than chance gives. It can count looks anywhere off screen or to one region.
 
+The panel's main result counts **events**, not looks: how many events had at least one look in the 10 s before, against the same count for randomly placed events, with a p value (the share of 500 random placements that did at least as well). Looks often come in bursts, so counting looks lets one event with several glances count several times, which widens the chance range; counting events avoids that. The look count is shown as well.
+
+**Exports** (below the histogram), for the region chosen in *Count looks to*:
+
+- *Export figure (PNG)*: a print-resolution figure for email or documents. Panel A is a raster (one row per event, a tick for each look, aligned to the event) above the histogram with its chance band; panel B is the gaze plane with the labelled regions and the share of time at each. The caption states the result.
+- *Export report (HTML)*: one self-contained file that prints to PDF: the result, a summary, the figure, looks and time per region, the event table with the time since the last look to each region, how the timeline was lined up, the method and the limits.
+- *Export responses (CSV)*: the event table for your own analysis.
+
+Item wording and saved responses are left out unless *Include item wording and responses* is ticked. No video frames are included in any export.
+
 A saved response marks when the response was submitted (usually on moving to the next page, or an autosave), not when it was chosen, so looks connected with it come before the mark.
 
 ### A second synchronised video

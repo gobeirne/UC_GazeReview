@@ -91,7 +91,8 @@ export class App {
       playhead: () => this.playhead(),
       seek: (t) => this.seek(t),
       pause: () => this.video.pause(),
-      analysis: () => ({ gaze: this.gaze, glances: this.events, regions: this.rec?.regions ?? [], coverage: this.coverage }),
+      analysis: () => ({ gaze: this.gaze, labels: this.labels, glances: this.events, regions: this.rec?.regions ?? [], coverage: this.coverage }),
+      planeView: () => ({ ...this.plane.view }),
       say: (m) => this.say(m),
       redraw: () => this.drawCanvases(),
     });
