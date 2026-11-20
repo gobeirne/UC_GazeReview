@@ -1,4 +1,4 @@
-import { AFTER, BEFORE, BIN, JUST_BEFORE, SHUFFLES, type PeriResult } from "../analysis/periEvent";
+import { AFTER, BEFORE, BIN, SHUFFLES, type PeriResult } from "../analysis/periEvent";
 import type { GazeSeries } from "../analysis/gazeModel";
 import type { Region } from "../store/types";
 
@@ -17,6 +17,11 @@ export interface FigureData {
   /** Looks and share of time with gaze per region, listed under panel B. */
   regionStats?: { name: string; colour: string; looks: number | null; share: number }[];
   caption: string;
+  /** Panel A as the aligned raster and histogram, or item by item against time ("staircase"). */
+  panelA?: "aligned" | "staircase";
+  staircase?: { t0: number; t1: number; rows: { label: string; changed: boolean; from: number; to: number; looks: [number, number][] }[] };
+  /** Only frames in this video span go into panel B's heatmap. */
+  heatSpan?: { start: number; end: number };
 }
 
 // Fixed light palette: the figure is for documents and email, whatever the app's theme.
@@ -42,7 +47,8 @@ export function drawFigure(data: FigureData, scale = 2): HTMLCanvasElement {
   ctx.fillStyle = C.muted; font(16);
   ctx.fillText(data.subtitle, 40, 70);
 
-  drawPanelA(ctx, data, { x: 40, y: 100, w: 940, h: 720 }, font);
+  if (data.panelA === "staircase" && data.staircase) drawStaircase(ctx, data, { x: 40, y: 100, w: 940, h: 720 }, font);
+  else drawPanelA(ctx, data, { x: 40, y: 100, w: 940, h: 720 }, font);
   drawPanelB(ctx, data, { x: 1040, y: 100, w: 520, h: 720 }, font);
 
   // Caption.
@@ -68,7 +74,7 @@ function drawPanelA(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
   const n = Math.max(1, p.raster.length);
   const rowH = (rasterBottom - rasterTop) / n;
   ctx.fillStyle = C.field; ctx.fillRect(L, rasterTop, R - L, rasterBottom - rasterTop);
-  ctx.fillStyle = C.window; ctx.fillRect(X(-JUST_BEFORE), rasterTop, X(0) - X(-JUST_BEFORE), rasterBottom - rasterTop);
+  ctx.fillStyle = C.window; ctx.fillRect(X(-p.windowMs), rasterTop, X(0) - X(-p.windowMs), rasterBottom - rasterTop);
   const labelEvery = Math.max(1, Math.ceil(12 / rowH));
   font(Math.min(13, Math.max(9, rowH * 0.8)));
   p.raster.forEach((row, i) => {
@@ -121,7 +127,7 @@ function drawPanelA(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
 
 function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: FontFn) {
   ctx.fillStyle = C.ink; font(18, 650); ctx.textAlign = "left";
-  ctx.fillText("B   Where gaze went (whole analysed video)", b.x, b.y + 12);
+  ctx.fillText(d.heatSpan ? "B   Where gaze went (during the timeline)" : "B   Where gaze went (whole analysed video)", b.x, b.y + 12);
   const V = d.view, g = d.gaze;
   const top = b.y + 50, availH = b.h - 110;
   const s = Math.min(b.w / (V.h1 - V.h0), availH / (V.v1 - V.v0));
@@ -134,6 +140,7 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
   let max = 1;
   for (let i = 0; i < g.n; i++) {
     if (!g.ok[i]) continue;
+    if (d.heatSpan && (g.t[i] < d.heatSpan.start || g.t[i] > d.heatSpan.end)) continue;
     const x = Math.floor(g.h[i] - V.h0), y = Math.floor(V.v1 - g.v[i]);
     if (x < 0 || y < 0 || x >= nx || y >= ny) continue;
     max = Math.max(max, ++cells[y * nx + x]);
@@ -186,6 +193,54 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
       ctx.fillText(`${Math.round(r.share * 100)}%`, b.x + 440, y);
     }
   }
+}
+
+/**
+ * Item by item against time: one row per save moment, a light bar from the previous save to this
+ * one (the time spent on that item), the save as a dark line, and the looks during it as bars.
+ * Answering in order gives a staircase from top left to bottom right.
+ */
+function drawStaircase(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: FontFn) {
+  const st = d.staircase!;
+  const L = b.x + 90, R = b.x + b.w - 10, top = b.y + 30, bottom = b.y + b.h - 50;
+  const X = (t: number) => L + ((t - st.t0) / Math.max(1, st.t1 - st.t0)) * (R - L);
+  ctx.fillStyle = C.ink; font(18, 650); ctx.textAlign = "left";
+  ctx.fillText(`A   Looks to ${d.target}, item by item`, b.x, b.y + 12);
+  const n = Math.max(1, st.rows.length), rowH = (bottom - top) / n;
+  ctx.fillStyle = C.field; ctx.fillRect(L, top, R - L, bottom - top);
+  // Minute grid.
+  ctx.strokeStyle = C.rule; ctx.lineWidth = 1; ctx.fillStyle = C.muted; font(13); ctx.textAlign = "center";
+  const mins = (st.t1 - st.t0) / 60000;
+  const step = mins > 60 ? 10 : mins > 20 ? 5 : mins > 8 ? 2 : 1;
+  for (let m = 0; m <= mins; m += step) {
+    const x = X(st.t0 + m * 60000);
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.fillText(String(m), x, bottom + 18);
+  }
+  font(14); ctx.fillText("Minutes from the start of the timeline", (L + R) / 2, bottom + 38);
+  const labelEvery = Math.max(1, Math.ceil(12 / rowH));
+  st.rows.forEach((r, i) => {
+    const y0 = top + i * rowH, h = Math.max(2, rowH * 0.7), yb = y0 + rowH * 0.15;
+    ctx.fillStyle = "rgba(29,95,168,0.12)";
+    ctx.fillRect(X(r.from), yb, Math.max(1, X(r.to) - X(r.from)), h);
+    ctx.fillStyle = "rgba(224,123,0,0.28)";
+    ctx.fillRect(X(Math.max(r.from, r.to - d.peri.windowMs)), yb, X(r.to) - X(Math.max(r.from, r.to - d.peri.windowMs)), h);
+    ctx.fillStyle = C.tick;
+    for (const [t, dur] of r.looks) ctx.fillRect(X(t) - 1, yb, Math.max(3, X(t + dur) - X(t) + 1), h);
+    ctx.fillStyle = C.chance; ctx.fillRect(X(r.to) - 1, y0, 2.5, rowH);
+    if (i % labelEvery === 0) {
+      font(Math.min(13, Math.max(9, rowH * 0.8))); ctx.textAlign = "right";
+      ctx.fillStyle = r.changed ? C.changed : C.muted;
+      ctx.fillText(r.label + (r.changed ? " *" : ""), L - 8, y0 + rowH / 2 + 4);
+    }
+  });
+  // Legend.
+  font(13); ctx.textAlign = "left";
+  const ly = bottom + 56;
+  ctx.fillStyle = "rgba(29,95,168,0.12)"; ctx.fillRect(L, ly - 10, 14, 10); ctx.fillStyle = C.ink; ctx.fillText("time on the item", L + 20, ly);
+  ctx.fillStyle = "rgba(224,123,0,0.28)"; ctx.fillRect(L + 150, ly - 10, 14, 10); ctx.fillStyle = C.ink; ctx.fillText(`${d.peri.windowMs / 1000} s before the save`, L + 170, ly);
+  ctx.fillStyle = C.tick; ctx.fillRect(L + 330, ly - 10, 14, 10); ctx.fillStyle = C.ink; ctx.fillText(`look to ${d.target}`, L + 350, ly);
+  ctx.fillStyle = C.chance; ctx.fillRect(L + 560, ly - 12, 2.5, 14); ctx.fillStyle = C.ink; ctx.fillText("saved", L + 570, ly);
 }
 
 function niceTicks(max: number): number[] {

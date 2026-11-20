@@ -1,4 +1,4 @@
-import { AFTER, BEFORE, BIN, JUST_BEFORE, median, periEvent, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
+import { AFTER, BEFORE, BIN, groupEvents, median, periEvent, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
 import type { GazeEvent } from "../analysis/events";
 import type { GazeSeries } from "../analysis/gazeModel";
 import { contains, type Interval } from "../analysis/intervals";
@@ -160,10 +160,12 @@ export class TimelinePanel {
     }
     if (t.id === "tl-order") this.dateOrder = t.value as "dmy" | "mdy";
     if (t.id === "tl-region") { this.region = t.value; this.renderAnalysis(); }
-    if (t.id === "tl-minframes" || t.id === "tl-lookmode") {
+    if (t.id === "tl-minframes" || t.id === "tl-lookmode" || t.id === "tl-window" || t.id === "tl-once") {
       const rec = this.host.rec();
       if (rec) {
+        if (t.id === "tl-once") rec.settings.countOnce = t.checked;
         if (t.id === "tl-minframes") rec.settings.minRegionFrames = Number(t.value);
+        else if (t.id === "tl-window") rec.settings.beforeWindowMs = Number(t.value);
         else rec.settings.lookMode = t.value as "standard" | "stretches";
         await this.host.save(); this.renderAnalysis(); this.host.redraw();
       }
@@ -184,7 +186,21 @@ export class TimelinePanel {
     const evs = rec.timeline.data.events;
     const times = evs.map((e) => this.videoTime(e));
     const sel = this.selectedLooks(glances, rec.settings.minLookMs);
-    const peri = periEvent(times, sel.map((g) => g.start), coverage, rec.frameIntervalMs, sel.map((g) => g.end - g.start));
+    const { peri, groups, prevs, span } = this.computePeri(times, sel, coverage);
+    const panelA = (this.box.querySelector<HTMLSelectElement>("#tl-panela")?.value ?? "staircase") as "aligned" | "staircase";
+    const sortedSel = sel.slice().sort((a, b) => a.start - b.start);
+    const staircase = {
+      t0: span?.start ?? times[0], t1: span?.end ?? times[times.length - 1],
+      rows: groups.map((g, i) => {
+        const items = g.members.map((m) => evs[m]);
+        const from = prevs ? prevs[i] : (i ? times[groups[i - 1].members[groups[i - 1].members.length - 1]] : span?.start ?? g.t - BEFORE);
+        return {
+          label: groupLabel(items), changed: items.some((e) => e.change_type === "revision"),
+          from, to: g.t,
+          looks: sortedSel.filter((l) => l.start > from && l.start <= g.t).map((l) => [l.start, l.end - l.start] as [number, number]),
+        };
+      }),
+    };
     if (!peri.events) { this.host.say("No saved responses have the minute before them analysed yet, so there’s nothing to report."); return null; }
     const where = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
     const conds = [
@@ -209,15 +225,16 @@ export class TimelinePanel {
       const change = e.change_type === "revision" ? `${prev ? answerLabel(prev, 20) : "?"} → ${answerLabel(e, 20)}` : e.change_type === "resave" ? "same again" : "first";
       return { event: e, videoMs: t, change, lastLook, analysed };
     });
-    const usedEvents = peri.used.map((i) => evs[i]);
-    const caption = figureCaption(target, peri);
+    const usedGroups = peri.used.map((i) => groups[i].members.map((m) => evs[m]));
+    const caption = figureCaption(target, peri, panelA);
     const fig = drawFigure({
       title: `Looks to ${target} around saved responses`,
       subtitle: `${rec.name} · ${peri.events} responses with the minute before analysed · ${(totalLength(coverage) / 60000).toFixed(1)} min of video analysed`,
       target, peri,
-      rowLabels: usedEvents.map((e) => `Q${e.question_number}`),
-      rowChanged: usedEvents.map((e) => e.change_type === "revision"),
-      gaze, view: this.host.planeView(), regions, caption,
+      rowLabels: usedGroups.map(groupLabel),
+      rowChanged: usedGroups.map((g) => g.some((e) => e.change_type === "revision")),
+      gaze, view: this.host.planeView(), regions, caption, panelA, staircase,
+      heatSpan: rec.settings.countOnce !== false && span ? span : undefined,
       regionStats: [
         ...regions.map((r, i) => ({ name: r.name, colour: r.colour, looks: r.isScreen ? null : glances.filter((g) => g.region === i).length, share: (d.get(r.isScreen ? SCREEN : i) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) })),
         { name: "Elsewhere", colour: "#e07b00", looks: glances.filter((g) => g.region === ELSEWHERE).length, share: (d.get(ELSEWHERE) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) },
@@ -242,6 +259,33 @@ export class TimelinePanel {
     if (kind === "export-figure") (d as unknown as { _canvas: HTMLCanvasElement })._canvas.toBlob((b) => b && downloadBlob(`${base}-looks-around-responses.png`, b), "image/png");
     if (kind === "export-report") download(`${base}-gaze-report.html`, buildReportHtml(d), "text/html");
     if (kind === "export-csv") download(`${base}-responses.csv`, buildCsv(d), "text/csv");
+  }
+
+  /** The timeline's span in video time: from its start to its finish (or last event). */
+  private span(): Interval | null {
+    const tl = this.host.rec()?.timeline;
+    if (!tl || !this.synced()) return null;
+    const s = this.videoTime({ time: tl.data.attempt.started } as TimelineEvent);
+    const lastEv = tl.data.events[tl.data.events.length - 1];
+    const fin = this.videoTime({ time: tl.data.attempt.finished } as TimelineEvent);
+    const e = Math.max(Number.isFinite(fin) ? fin : -Infinity, lastEv ? this.videoTime(lastEv) + AFTER : -Infinity);
+    return Number.isFinite(s) && Number.isFinite(e) && e > s ? { start: s, end: e } : null;
+  }
+
+  /**
+   * Saves at the same moment are merged; with "count each look once", each moment only counts looks
+   * since the previous save (the first since the timeline's start), and chance placements stay within
+   * the timeline's span, so the rest of the recording doesn't set the baseline.
+   */
+  private computePeri(times: number[], looks: GazeEvent[], coverage: Interval[]) {
+    const rec = this.host.rec()!;
+    const groups = groupEvents(times);
+    const span = this.span();
+    const once = rec.settings.countOnce !== false;
+    const prevs = once ? groups.map((g, i) => (i ? times[groups[i - 1].members[groups[i - 1].members.length - 1]] : span?.start ?? NaN)) : undefined;
+    const peri = periEvent(groups.map((g) => g.t), looks.map((g) => g.start), coverage, rec.frameIntervalMs, looks.map((g) => g.end - g.start),
+      rec.settings.beforeWindowMs ?? 10_000, prevs, once && span ? span : undefined);
+    return { peri, groups, prevs, span };
   }
 
   /** Looks as formed for this analysis: the app's looks, or "stretches" (every region treated as ordinary). */
@@ -333,6 +377,8 @@ export class TimelinePanel {
         <div class="row small"><label>Count looks to <select id="tl-region"></select></label>
           <label>lasting at least <select id="tl-minlook">${[[0, "any length"], [100, "0.1 s"], [200, "0.2 s"], [300, "0.3 s"], [500, "0.5 s"], [1000, "1 s"]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></label>
           <label>with at least <select id="tl-minframes">${[0, 2, 3, 5, 7, 10].map((v) => `<option value="${v}">${v ? `${v} frames` : "any frames"}</option>`).join("")}</select> in the region</label>
+          <label>Window before saves <select id="tl-window">${[5, 10, 15, 20, 30].map((v) => `<option value="${v * 1000}">${v} s</option>`).join("")}</select></label>
+          <label class="check"><input type="checkbox" id="tl-once"> Count each look once, within the timeline</label>
           <label>Looks formed <select id="tl-lookmode"><option value="standard">as away from the screen</option><option value="stretches">as stretches, by most frames (earlier figures)</option></select></label></div>
         <canvas id="tl-hist" aria-label="Looks away before and after events"></canvas>
         <p id="tl-hist-note" class="small"></p>
@@ -340,6 +386,7 @@ export class TimelinePanel {
           <button data-act="export-figure">Export figure (PNG)</button>
           <button data-act="export-report">Export report (HTML)</button>
           <button data-act="export-csv">Export responses (CSV)</button>
+          <label class="small">Panel A <select id="tl-panela"><option value="staircase">item by item against time</option><option value="aligned">aligned to each save, with histogram</option></select></label>
           <label class="check small"><input type="checkbox" id="tl-include-text"> Include item wording and responses</label>
         </div>
       </div>
@@ -365,6 +412,10 @@ export class TimelinePanel {
     if (minSel) minSel.value = String(minLook);
     const mfSel = this.box.querySelector<HTMLSelectElement>("#tl-minframes");
     if (mfSel) mfSel.value = String(rec.settings.minRegionFrames ?? 0);
+    const onceBox = this.box.querySelector<HTMLInputElement>("#tl-once");
+    if (onceBox) onceBox.checked = rec.settings.countOnce !== false;
+    const winSel = this.box.querySelector<HTMLSelectElement>("#tl-window");
+    if (winSel) winSel.value = String(rec.settings.beforeWindowMs ?? 10_000);
     const modeSel = this.box.querySelector<HTMLSelectElement>("#tl-lookmode");
     if (modeSel) modeSel.value = rec.settings.lookMode ?? "standard";
     const synced = this.synced();
@@ -401,7 +452,8 @@ export class TimelinePanel {
       if (note) note.innerHTML = `<span class="warn-line">No region is marked as the screen, so looks can’t be counted. Tick “Screen” for the screen region in the Regions panel.</span>`;
       return;
     }
-    this.drawHist(periEvent(evs.map((e) => this.videoTime(e)), chosen.map((g) => g.start), coverage, dt, chosen.map((g) => g.end - g.start)));
+    void dt;
+    this.drawHist(this.computePeri(evs.map((e) => this.videoTime(e)), chosen, coverage).peri);
   }
 
   private drawHist(h: PeriResult | null) {
@@ -434,9 +486,9 @@ export class TimelinePanel {
     ctx.textAlign = "right";
     ctx.fillText(String(max), L - 6, T + 8); ctx.fillText("0", L - 6, B);
     const lat = median(h.latencies);
-    note.innerHTML = `<strong>${h.eventsWithLook} of ${h.events} events</strong> had a look in the ${JUST_BEFORE / 1000} s before; with the events at random times in the analysed video, ${h.eventsWithLookMean.toFixed(1)} on average, and ${pText(h)}.` +
+    note.innerHTML = `<strong>${h.eventsWithLook} of ${h.events} save moments</strong> had a look in the ${h.windowMs / 1000} s before; with the events at random times in the analysed video, ${h.eventsWithLookMean.toFixed(1)} on average, and ${pText(h)}.` +
       (h.latencies.length ? ` Median time from the last look to the event: ${(lat / 1000).toFixed(1)} s.` : "") +
-      `<br><span class="muted">Bars: looks starting in each 5 s bin. Line and band: the same looks around randomly placed events (mean and 95% range, ${SHUFFLES} placements). Counting looks rather than events (bursts count several times): ${h.looksBefore} in the ${JUST_BEFORE / 1000} s before, chance range ${h.sumLo}–${h.sumHi}.</span>`;
+      `<br><span class="muted">Bars: looks starting in each 5 s bin. Line and band: the same looks around randomly placed events (mean and 95% range, ${SHUFFLES} placements). Counting looks rather than events (bursts count several times): ${h.looksBefore} in the ${h.windowMs / 1000} s before, chance range ${h.sumLo}–${h.sumHi}.</span>`;
   }
 }
 
@@ -452,4 +504,12 @@ function fmtClock(stamp: string): string {
   if (!m) return stamp;
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${+m[3]} ${months[+m[2] - 1]} ${m[1]}, ${m[4]}`;
+}
+
+/** "Q12", or "Q30–Q32" / "Q4, Q9" for saves at the same moment. */
+function groupLabel(g: { question_number: number }[]): string {
+  const q = g.map((e) => e.question_number);
+  if (q.length === 1) return `Q${q[0]}`;
+  const consecutive = q.every((x, i) => i === 0 || x === q[i - 1] + 1);
+  return consecutive ? `Q${q[0]}–Q${q[q.length - 1]}` : q.map((x) => `Q${x}`).join(", ");
 }

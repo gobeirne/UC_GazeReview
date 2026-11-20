@@ -1,4 +1,4 @@
-import { JUST_BEFORE, median, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
+import { median, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
 import type { GazeModelInfo } from "../analysis/gazeModel";
 import type { Recording } from "../store/types";
 import type { TimelineEvent } from "../timeline/eventTimeline";
@@ -33,14 +33,16 @@ export interface ReportData {
 /** One-sentence result used in the figure caption and the report. */
 export function resultSentence(target: string, p: PeriResult): string {
   const lat = median(p.latencies);
-  return `${p.eventsWithLook} of ${p.events} saved responses had a look to ${target} in the ${JUST_BEFORE / 1000} s before. ` +
-    `With the same number of responses placed at random times in the analysed video, ${p.eventsWithLookMean.toFixed(1)} would on average; ${pText(p)}.` +
+  return `${p.eventsWithLook} of ${p.events} save moments had a look to ${target} in the ${p.windowMs / 1000} s before (saves within 2 s of each other count as one moment). ` +
+    `With the same number of moments placed at random times in the analysed video, ${p.eventsWithLookMean.toFixed(1)} would on average; ${pText(p)}.` +
     (p.latencies.length ? ` Median time from the last such look to the save: ${(lat / 1000).toFixed(1)} s.` : "");
 }
 
-export function figureCaption(target: string, p: PeriResult): string {
-  return `A: Each row is one saved response with an analysed minute before it (* = a changed response); each tick is a look to ${target}, ` +
-    `aligned to the moment the response was saved (dashed line); the shaded strip is the ${JUST_BEFORE / 1000} s before. Below, looks per 5 s bin with the range expected if ` +
+export function figureCaption(target: string, p: PeriResult, panelA: "aligned" | "staircase" = "aligned"): string {
+  if (panelA === "staircase") return `A: Each row is one save moment, in order (several items saved together share a row; * = a changed response). The light bar is the time from the previous save to this one, the shaded end of it the ${p.windowMs / 1000} s before the save, the blue line the save, and the dark bars looks to ${target}. ` +
+    `B: Where gaze fell during the timeline, with the labelled regions. ` + resultSentence(target, p) + " A saved response marks when the answer was submitted, not when it was chosen.";
+  return `A: Each row is one save moment with an analysed minute before it (several items saved together share a row; * = a changed response); each tick is a look to ${target}, ` +
+    `aligned to the moment the response was saved (dashed line); the shaded strip is the ${p.windowMs / 1000} s before. Below, looks per 5 s bin with the range expected if ` +
     `the responses had been saved at random times. B: Where gaze fell over the whole analysed video, with the labelled regions. ` +
     resultSentence(target, p) + " A saved response marks when the answer was submitted, not when it was chosen.";
 }
@@ -89,9 +91,9 @@ export function buildReportHtml(d: ReportData): string {
 <dl class="summary">
   <dt>Video analysed</dt><dd>${mins(d.analysedMs)}; gaze measured in ${pct(d.gazeMs / Math.max(1, d.analysedMs))} of it</dd>
   <dt>Event timeline</dt><dd>${esc(tl.data.attempt.quiz_title || tl.fileName)}: ${tl.data.events.length} saved responses (${tl.data.events.filter((e) => e.change_type === "revision").length} changed) from ${esc(tl.data.attempt.started.replace("T", " "))} to ${esc(tl.data.attempt.finished.replace("T", " "))}</dd>
-  <dt>Responses counted</dt><dd>${d.peri.events}, each with the minute before and 10 s after it analysed</dd>
+  <dt>Responses counted</dt><dd>${d.peri.events} moments, each with the minute before and 10 s after it analysed (saves within 2 s of each other count as one moment)</dd>
   <dt>Looks counted</dt><dd>to ${esc(d.target)}</dd>
-  <dt>Looks in the ${JUST_BEFORE / 1000} s before responses</dt><dd>${d.peri.looksBefore} (counting every look; chance range ${d.peri.sumLo}–${d.peri.sumHi})</dd>
+  <dt>Looks in the ${d.peri.windowMs / 1000} s before responses</dt><dd>${d.peri.looksBefore} (counting every look; chance range ${d.peri.sumLo}–${d.peri.sumHi})</dd>
 </dl>
 
 <h2>Figure</h2>
@@ -127,7 +129,7 @@ ${s.lookMode === "stretches"
   ? "For the event analysis, looks were formed with every region treated as an ordinary region: a look is a stretch of frames outside the main on-screen cluster, credited to the region it spends most frames in, so brief crossings into a region are not counted separately."
   : `A look is a run of at least ${s.minFrames} frames away from the screen region, credited to the labelled region it spends most frames in.`}
 ${s.minLookMs ? ` Looks shorter than ${s.minLookMs / 1000} s were left out.` : ""}${s.minRegionFrames ? ` Looks with fewer than ${s.minRegionFrames} frames inside the region were left out.` : ""}</p>
-<p>For the test, each saved response with its whole window analysed was counted as having a look if a look to ${esc(d.target)} started in the ${JUST_BEFORE / 1000} s before it. Chance was estimated by placing the same number of responses at random times in the analysed video ${SHUFFLES} times (fixed seed) and counting the same way. The p value is the share of placements with at least as many responses with a look, with one added to both counts.</p>
+<p>For the test, each saved response with its whole window analysed was counted as having a look if a look to ${esc(d.target)} started in the ${d.peri.windowMs / 1000} s before it. Chance was estimated by placing the same number of responses at random times in the analysed video ${SHUFFLES} times (fixed seed) and counting the same way. The p value is the share of placements with at least as many responses with a look, with one added to both counts.</p>
 
 <h2>Limits</h2>
 <ul>

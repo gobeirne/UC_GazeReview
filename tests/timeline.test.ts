@@ -89,3 +89,47 @@ describe("look durations", () => {
     expect(r.raster[0]).toEqual([[-5000, 1200], [-3000, 66]]);
   });
 });
+
+describe("saves at the same moment", () => {
+  test("are merged into one event", async () => {
+    const { groupEvents } = await import("../src/analysis/periEvent");
+    const g = groupEvents([10_000, 70_000, 70_400, 71_000, 140_000]);
+    expect(g.map((x) => x.members)).toEqual([[0], [1, 2, 3], [4]]);
+    expect(g[1].t).toBe(70_000);
+  });
+  test("a wider window catches looks further before the save", async () => {
+    const { periEvent: pe } = await import("../src/analysis/periEvent");
+    const r10 = pe([100_000], [86_000], [{ start: 0, end: 200_000 }], 33, undefined, 10_000);
+    const r15 = pe([100_000], [86_000], [{ start: 0, end: 200_000 }], 33, undefined, 15_000);
+    expect(r10.eventsWithLook).toBe(0);
+    expect(r15.eventsWithLook).toBe(1);
+  });
+});
+
+describe("count each look once", () => {
+  test("a look before the previous save isn't counted again", async () => {
+    const { periEvent: pe } = await import("../src/analysis/periEvent");
+    // Saves 30 s apart; one look 8 s before each save.
+    const saves = [100_000, 130_000, 160_000];
+    const looks = saves.map((t) => t - 8_000);
+    const cov = [{ start: 0, end: 300_000 }];
+    const all = pe(saves, looks, cov, 33, undefined, 15_000);
+    const once = pe(saves, looks, cov, 33, undefined, 15_000, [60_000, 100_000, 130_000]);
+    // Without truncation the 160 s row also shows the look at 122 s (the previous item's); with it, only its own.
+    expect(all.raster[2].length).toBe(2);
+    expect(once.raster[2].length).toBe(1);
+    expect(once.eventsWithLook).toBe(3);
+  });
+  test("chance placements stay inside the given span", async () => {
+    const { periEvent: pe } = await import("../src/analysis/periEvent");
+    // Lots of looks outside the span inflate chance unless placements are limited to the span.
+    const saves = Array.from({ length: 20 }, (_, i) => 1_000_000 + i * 60_000);
+    const looks = [...saves.map((t) => t - 5_000), ...Array.from({ length: 400 }, (_, i) => i * 2_400)];
+    const cov = [{ start: 0, end: 2_300_000 }];
+    const prevs = saves.map((t, i) => (i ? saves[i - 1] : 960_000));
+    const wide = pe(saves, looks, cov, 33, undefined, 15_000, prevs);
+    const inSpan = pe(saves, looks, cov, 33, undefined, 15_000, prevs, { start: 960_000, end: 2_200_000 });
+    expect(inSpan.eventsWithLookMean).toBeLessThan(wide.eventsWithLookMean);
+    expect(inSpan.p).toBeLessThan(0.01);
+  });
+});

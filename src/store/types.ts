@@ -90,6 +90,10 @@ export interface RecordingSettings {
    * most frames in; brief crossings into a region don't count.
    */
   lookMode: "standard" | "stretches";
+  /** The "just before" window for the event test (ms). */
+  beforeWindowMs: number;
+  /** Count each look only for the item being answered (since the previous save), and compare with chance only within the timeline's span. */
+  countOnce: boolean;
 }
 
 export const DEFAULT_SETTINGS: RecordingSettings = {
@@ -106,6 +110,8 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   minLookMs: 0,
   minRegionFrames: 0,
   lookMode: "standard",
+  beforeWindowMs: 10_000,
+  countOnce: true,
 };
 
 /** How video time relates to the clock times of an event timeline. */

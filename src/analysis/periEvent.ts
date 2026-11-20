@@ -4,6 +4,8 @@ import type { Interval } from "./intervals";
 export const BEFORE = 60_000, AFTER = 10_000, BIN = 5_000, JUST_BEFORE = 10_000, SHUFFLES = 500;
 
 export interface PeriResult {
+  /** The "just before" window used (ms). */
+  windowMs: number;
   /** Events whose whole window was analysed (the ones counted), as indexes into the input. */
   used: number[];
   events: number;
@@ -31,35 +33,46 @@ export interface PeriResult {
  * which widens the chance range. Counting events with at least one look in the 10 s before is
  * unaffected by bursts, and is the main test.
  */
-export function periEvent(eventTimes: number[], looks: number[], coverage: Interval[], frameMs: number, durations?: number[]): PeriResult {
+/**
+ * prevTimes (optional, aligned with eventTimes): the previous save before each event. When given,
+ * looks at or before the previous save are not counted for an event, so each look belongs to the
+ * item being answered when it happened and isn't counted again for the next item. Random
+ * placements are treated the same way (each against the previous random time).
+ */
+export function periEvent(eventTimes: number[], looks: number[], coverage: Interval[], frameMs: number, durations?: number[], windowMs = JUST_BEFORE, prevTimes?: number[], placeWithin?: Interval): PeriResult {
   const nb = (BEFORE + AFTER) / BIN;
-  const jb0 = (BEFORE - JUST_BEFORE) / BIN, jb1 = BEFORE / BIN; // bins covering the 10 s before
-  const inside = (t: number) => coverage.some((c) => t - BEFORE >= c.start - frameMs && t + AFTER <= c.end + frameMs);
+  const jb0 = (BEFORE - windowMs) / BIN, jb1 = BEFORE / BIN; // bins covering the window before
+  const lead = prevTimes ? Math.min(BEFORE, windowMs) : BEFORE; // with counting since the previous save, only the window itself must be analysed
+  const inside = (t: number) => coverage.some((c) => t - lead >= c.start - frameMs && t + AFTER <= c.end + frameMs);
   const used = eventTimes.map((t, i) => ({ t, i })).filter((x) => Number.isFinite(x.t) && inside(x.t));
   const order = looks.map((_, i) => i).sort((a, b) => looks[a] - looks[b]);
   const sorted = order.map((i) => looks[i]);
   const durs = order.map((i) => durations?.[i] ?? 0);
   const lowerBound = (x: number) => { let lo = 0, hi = sorted.length; while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] < x) lo = m + 1; else hi = m; } return lo; };
-  const measure = (times: number[], keepRaster: boolean) => {
+  const measure = (times: number[], keepRaster: boolean, prevs?: number[]) => {
     const h = new Array(nb).fill(0);
     let hits = 0;
     const raster: [number, number][][] = [], latencies: number[] = [];
-    for (const t of times) {
+    times.forEach((t, ti) => {
       const row: [number, number][] = [];
       let lastBefore = -Infinity;
-      for (let k = lowerBound(t - BEFORE); k < sorted.length && sorted[k] < t + AFTER; k++) {
+      const from = prevs && Number.isFinite(prevs[ti]) ? Math.max(t - BEFORE, prevs[ti] + 1) : t - BEFORE;
+      for (let k = lowerBound(from); k < sorted.length && sorted[k] < t + AFTER; k++) {
         const d = sorted[k] - t;
         h[Math.floor((d + BEFORE) / BIN)]++;
         if (keepRaster) row.push([d, durs[k]]);
-        if (d >= -JUST_BEFORE && d < 0) lastBefore = Math.max(lastBefore, d);
+        if (d >= -windowMs && d < 0) lastBefore = Math.max(lastBefore, d);
       }
       if (lastBefore > -Infinity) { hits++; latencies.push(-lastBefore); }
       if (keepRaster) raster.push(row);
-    }
+    });
     return { h, hits, raster, latencies };
   };
-  const obs = measure(used.map((x) => x.t), true);
-  const spans = coverage.map((c) => ({ a: c.start + BEFORE, b: c.end - AFTER })).filter((s) => s.b > s.a);
+  const obs = measure(used.map((x) => x.t), true, prevTimes ? used.map((x) => prevTimes[x.i]) : undefined);
+  // Random placements: anywhere a whole window fits in analysed video, limited to placeWithin if given
+  // (e.g. the span of the event timeline, so other parts of the recording don't set the baseline).
+  const clipped = placeWithin ? coverage.map((c) => ({ start: Math.max(c.start, placeWithin.start), end: Math.min(c.end, placeWithin.end) })).filter((c) => c.end > c.start) : coverage;
+  const spans = clipped.map((c) => ({ a: c.start + lead, b: c.end - AFTER })).filter((s) => s.b > s.a);
   const total = spans.reduce((s, x) => s + (x.b - x.a), 0);
   const runs: number[][] = [], sums: number[] = [], hitRuns: number[] = [];
   let seed = 12345;
@@ -71,7 +84,9 @@ export function periEvent(eventTimes: number[], looks: number[], coverage: Inter
         for (const s of spans) { const len = s.b - s.a; if (x < len) return s.a + x; x -= len; }
         return spans[spans.length - 1].b;
       });
-      const m = measure(ts, false);
+      let m;
+      if (prevTimes) { ts.sort((a, b) => a - b); m = measure(ts, false, ts.map((_, i) => (i ? ts[i - 1] : NaN))); }
+      else m = measure(ts, false);
       runs.push(m.h);
       sums.push(m.h.slice(jb0, jb1).reduce((a, b) => a + b, 0));
       hitRuns.push(m.hits);
@@ -81,6 +96,7 @@ export function periEvent(eventTimes: number[], looks: number[], coverage: Inter
   const meanOf = (a: number[]) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0);
   const atLeast = hitRuns.filter((x) => x >= obs.hits).length;
   return {
+    windowMs,
     used: used.map((x) => x.i),
     events: used.length,
     observed: obs.h,
@@ -111,4 +127,20 @@ export function median(a: number[]): number {
   if (!a.length) return NaN;
   const s = a.slice().sort((x, y) => x - y), m = s.length >> 1;
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/**
+ * Saves within gapMs of each other (several items saved by one page submission, or a final
+ * "submit all") are one moment of behaviour. Counting each separately would count the same
+ * looks several times and make the test look stronger than it is, so they are merged into one
+ * event at the time of the first. Input must be in time order. Returns groups of indexes.
+ */
+export function groupEvents(times: number[], gapMs = 2000): { t: number; members: number[] }[] {
+  const groups: { t: number; members: number[] }[] = [];
+  times.forEach((t, i) => {
+    const last = groups[groups.length - 1];
+    if (last && Number.isFinite(t) && t - times[last.members[last.members.length - 1]] <= gapMs) last.members.push(i);
+    else groups.push({ t, members: [i] });
+  });
+  return groups;
 }

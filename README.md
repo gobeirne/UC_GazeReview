@@ -115,13 +115,17 @@ The *Event timeline* panel attaches timestamped events to the recording and show
 
 The panel's main result counts **events**, not looks: how many events had at least one look in the 10 s before, against the same count for randomly placed events, with a p value (the share of 500 random placements that did at least as well). Looks often come in bursts, so counting looks lets one event with several glances count several times, which widens the chance range; counting events avoids that. The look count is shown as well.
 
+*Window before saves* sets how far before each save a look counts (5–30 s; 10 s by default). Choose it from what you've seen in the video before looking at the result. Saves less than 2 s apart (several items saved by one page, or a final submit) count as one moment, so the same looks aren't counted several times; in the raster they share a row labelled with all their items.
+
+*Count each look once, within the timeline* (on by default) counts a look only for the item being answered when it happened: from the previous save to this one, not also in the next item's minute. It also keeps the chance comparison and panel B's heatmap to the timeline's span (from its start to its finish), so other parts of the recording, such as before the timeline starts, don't affect them.
+
 *Looks formed* chooses how looks are made for this analysis. *As away from the screen* (the default) uses the looks listed in *Glances away*. *As stretches, by most frames* is how the first exported figures counted: every region is treated as an ordinary region, so a look is a stretch outside the main on-screen cluster, credited to the region it spends most frames in, and brief crossings into a region don't count separately. *with at least … frames in the region* keeps only looks with that many frames inside the chosen region.
 
 *lasting at least* leaves out looks shorter than a chosen length (0.1–1 s), so brief crossings of a region's edge (a few frames, often noise near the screen's edge) can be separated from sustained looks. In the exported raster each look is drawn as a bar as long as the look, so the two kinds can be told apart by eye. Choose the length for a reason other than the result (for example, from how long the looks you can see in the video last), or the p value loses its meaning.
 
 **Exports** (below the histogram), for the region chosen in *Count looks to*:
 
-- *Export figure (PNG)*: a print-resolution figure for email or documents. Panel A is a raster (one row per event, a tick for each look, aligned to the event) above the histogram with its chance band; panel B is the gaze plane with the labelled regions and the share of time at each. The caption states the result.
+- *Export figure (PNG)*: a print-resolution figure for email or documents. *Panel A* can show the items one by one against time (each row the time from the previous save to this one, with looks during it; answering in order makes a staircase), or a raster (one row per event, a tick for each look, aligned to the event) above the histogram with its chance band; panel B is the gaze plane with the labelled regions and the share of time at each. The caption states the result.
 - *Export report (HTML)*: one self-contained file that prints to PDF: the result, a summary, the figure, looks and time per region, the event table with the time since the last look to each region, how the timeline was lined up, the method and the limits.
 - *Export responses (CSV)*: the event table for your own analysis.
 
