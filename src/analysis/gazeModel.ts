@@ -49,6 +49,10 @@ export interface GazeModelInfo {
   /** The student's median lid opening (lid gap / eye width), for live blink detection. */
   lidMedian: number;
   blinksRemoved: number;
+  /** Why frames have no gaze, as fractions of all analysed frames. */
+  missing: { noFace: number; eyesOut: number; eyesClosed: number; olderAnalysis: number };
+  /** Fraction of frames brightened before tracking. */
+  brightened: number;
 }
 
 /** Prior degrees per unit of eye measure, with the sign for the display convention. */
@@ -74,9 +78,15 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
   const gapMs = Math.max(150, rec.frameIntervalMs * 4);
 
   let lastEyeT = -Infinity, lastH = NaN, lastV = NaN;
+  let nNoFace = 0, nEyesOut = 0, nOlder = 0, nBright = 0;
   for (let i = 0; i < n; i++) {
     const { r, j } = refs[i];
     const c = r.cols;
+    if (!r.valid[j]) {
+      const why = c.why[j];
+      if (why === 1) nNoFace++; else if (why === 2) nEyesOut++; else nOlder++;
+    }
+    if (c.gain[j] > 1.05) nBright++;
     t[i] = r.t[j];
     // Runs that follow on from each other (saved in pieces) join up; an unaligned capture never does.
     const otherRun = i > 0 && refs[i - 1].r !== r && (refs[i - 1].r.approx || r.approx);
@@ -158,6 +168,11 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
       validFraction: n ? nOk / n : 0,
       lidMedian: lidMed,
       blinksRemoved,
+      missing: n ? {
+        noFace: nNoFace / n, eyesOut: nEyesOut / n, olderAnalysis: nOlder / n,
+        eyesClosed: Math.max(0, (n - nOk - nNoFace - nEyesOut - nOlder) / n),
+      } : { noFace: 0, eyesOut: 0, eyesClosed: 0, olderAnalysis: 0 },
+      brightened: n ? nBright / n : 0,
     },
   };
 }
@@ -294,8 +309,19 @@ function baseline(t: Float64Array, x: Float32Array, member: Uint8Array, windowMs
     grid.push(g);
     vals.push(w.length >= 30 ? median(w) : NaN);
   }
-  // Fill grid gaps from neighbours, else the global fallback.
-  for (let k = 0; k < vals.length; k++) if (!Number.isFinite(vals[k])) vals[k] = fallback;
+  // Grid points without enough on-screen frames take the nearest point that has them, so a
+  // posture change across a stretch without gaze carries over; the overall centre only if none do.
+  const filled = vals.slice();
+  for (let k = 0; k < vals.length; k++) {
+    if (Number.isFinite(vals[k])) continue;
+    let best = NaN;
+    for (let d = 1; d < vals.length && !Number.isFinite(best); d++) {
+      if (k - d >= 0 && Number.isFinite(vals[k - d])) best = vals[k - d];
+      else if (k + d < vals.length && Number.isFinite(vals[k + d])) best = vals[k + d];
+    }
+    filled[k] = Number.isFinite(best) ? best : fallback;
+  }
+  for (let k = 0; k < vals.length; k++) vals[k] = filled[k];
   let g = 0;
   for (let i = 0; i < n; i++) {
     while (g < grid.length - 2 && t[i] > grid[g + 1]) g++;

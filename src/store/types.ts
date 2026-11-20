@@ -13,6 +13,8 @@ export const FIELDS = [
   "blinkL", "blinkR",        // blink blendshape scores 0..1
   "openL", "openR",          // lid gap / eye width
   "jaw",                     // jawOpen blendshape 0..1 (mouth movement, for telling speaking from quiet)
+  "why",                     // 0 = face used; 1 = no face found; 2 = face found but eyes out of frame
+  "gain",                    // brightening applied to the frame before tracking (1 = none)
 ] as const;
 export type Field = (typeof FIELDS)[number];
 

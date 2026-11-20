@@ -4,6 +4,7 @@ import { buildGaze, indexAt, type GazeSeries } from "../analysis/gazeModel";
 import { LiveGaze, type LivePoint } from "../analysis/live";
 import { LM } from "../tracking/landmarks";
 import { Fingerprinter, measure, shiftRun, splitRun } from "../analysis/frame";
+import { FramePrep, meanOf } from "../video/prepare";
 import { normalise, subtract, totalLength, union, type Interval } from "../analysis/intervals";
 import { alignCapture, ScreenCapture, type Crop } from "../capture/capture";
 import * as db from "../store/db";
@@ -56,6 +57,8 @@ export class App {
   private lastAttemptPh = NaN;
   private prefs = loadPrefs();
   private lock = new RecordingLock();
+  private livePrep = new FramePrep();
+  private liveFpr: Fingerprinter | null = null;
   private sidecarTimer = 0;
   private sidecarLast = 0;
   private sidecarError = "";
@@ -207,6 +210,8 @@ export class App {
       if (b.dataset.act === "scope") this.setScope(this.scopeSeg === id ? null : id);
       if (b.dataset.act === "analyse") this.analysePending();
       if (b.dataset.act === "delete") this.deleteSegment(id);
+      if (b.dataset.act === "reanalyse") this.reanalyseSegment(id);
+      if (b.dataset.act === "fill") this.fillGaps(id);
     });
     this.q("#scope-all").addEventListener("click", () => this.setScope(null));
     this.q("#stop-busy").addEventListener("click", () => this.busy?.abort.abort());
@@ -466,6 +471,71 @@ export class App {
     if (this.scopeSeg === id) this.scopeSeg = null;
     await this.saveRec();
     this.recompute();
+  }
+
+  /**
+   * Stretches of a segment where analysed frames have no face: at least 0.5 s long, merged
+   * when less than 5 s apart (each stretch costs a seek and a 1 s lead-in), widened by a
+   * frame each side.
+   */
+  private noGazeStretches(seg: Segment): Interval[] {
+    const dt = this.rec?.frameIntervalMs ?? 33;
+    const found: Interval[] = [];
+    for (const r of this.runs) {
+      if (r.end <= seg.start || r.start >= seg.end) continue;
+      let s = -1;
+      for (let i = 0; i <= r.t.length; i++) {
+        const bad = i < r.t.length && !r.valid[i] && r.t[i] >= seg.start && r.t[i] < seg.end;
+        if (bad && s < 0) s = i;
+        if (!bad && s >= 0) {
+          const a = r.t[s], b = r.t[i - 1] + dt;
+          if (b - a >= 500) found.push({ start: Math.max(seg.start, a - dt), end: Math.min(seg.end, b + dt) });
+          s = -1;
+        }
+      }
+    }
+    return normalise(found, 5000);
+  }
+
+  /** Analyses again only the no-gaze stretches of a segment, keeping everything else. */
+  private async fillGaps(id: string) {
+    if (!this.rec || this.busy) return;
+    const seg = this.rec.segments.find((s) => s.id === id);
+    if (!seg) return;
+    if (!this.src) return this.say(`Open ${this.rec.fileName ?? "the video file"} first.`);
+    const gaps = this.noGazeStretches(seg);
+    if (!gaps.length) return this.say("This segment has no stretches without gaze to fill.");
+    const total = totalLength(gaps);
+    if (!confirm(`Analyse again the ${gaps.length} stretch${gaps.length === 1 ? "" : "es"} with no gaze in this segment (${fmtTime(total, 0)} of ${fmtTime(seg.end - seg.start, 0)})? Frames with gaze are kept.`)) return;
+    const remove: string[] = [], add: Run[] = [];
+    for (const r of this.runs) {
+      if (!gaps.some((g) => g.start < r.end && g.end > r.start)) continue;
+      remove.push(r.id);
+      add.push(...splitRun(r, gaps.reduce<Interval[]>((pieces, g) => pieces.flatMap((p) => subtract(p, [g])), [{ start: r.start, end: r.end }])));
+    }
+    await db.deleteRuns(remove); await db.putRuns(add);
+    this.runs = await db.getRuns(this.rec.id);
+    this.recompute();
+    this.analysePending();
+  }
+
+  /** Discards the analysed frames inside a segment and analyses it again. */
+  private async reanalyseSegment(id: string) {
+    if (!this.rec || this.busy) return;
+    const seg = this.rec.segments.find((s) => s.id === id);
+    if (!seg) return;
+    if (!this.src) return this.say(`Open ${this.rec.fileName ?? "the video file"} first.`);
+    if (!confirm(`Analyse ${fmtTime(seg.start, 0)}–${fmtTime(seg.end, 0)} again? Its current results are replaced as the new ones come in. Regions are kept.`)) return;
+    const remove: string[] = [], add: Run[] = [];
+    for (const r of this.runs) {
+      if (r.end <= seg.start || r.start >= seg.end) continue;
+      remove.push(r.id);
+      add.push(...splitRun(r, subtract({ start: r.start, end: r.end }, [{ start: seg.start, end: seg.end }])));
+    }
+    await db.deleteRuns(remove); await db.putRuns(add);
+    this.runs = await db.getRuns(this.rec.id);
+    this.recompute();
+    this.analysePending();
   }
 
   private pendingGaps(): Interval[] {
@@ -844,10 +914,13 @@ export class App {
     }
     try {
       if (!Number.isFinite(this.lastLiveT) || t <= this.lastLiveT || t - this.lastLiveT > 500) trackerClock.begin(t);
-      const res = this.tracker.detect(this.video, trackerClock.at(t));
+      this.liveFpr ??= new Fingerprinter();
+      const mid = this.liveFpr.drawMid(this.video);
+      const frame = this.livePrep.draw(this.video, this.video.videoWidth, this.video.videoHeight, meanOf(mid));
+      const raw = this.livePrep.unmap(this.tracker.detect(frame, trackerClock.at(t)).raw);
       this.lastLiveT = t;
-      this.liveLandmarks = res.raw ? { t, pts: res.raw.landmarks } : null;
-      this.live.push(t, measure(res.raw), this.gaze, this.rec.settings);
+      this.liveLandmarks = raw ? { t, pts: raw.landmarks } : null;
+      this.live.push(t, measure(raw, this.livePrep.gain), this.gaze, this.rec.settings);
     } catch (e) {
       console.warn("live tracking", e);
     }
@@ -1161,6 +1234,8 @@ export class App {
         <div class="seg-actions">
           <button data-act="scope" data-id="${s.id}">${s.id === this.scopeSeg ? "Show all" : "Show"}</button>
           ${pct < 99 && this.rec!.kind === "file" ? `<button data-act="analyse" data-id="${s.id}">Analyse</button>` : ""}
+          ${pct > 0 && this.rec!.kind === "file" && this.noGazeStretches(s).length ? `<button data-act="fill" data-id="${s.id}" title="Analyse again only the stretches of this segment with no gaze, keeping the rest">Fill gaps</button>` : ""}
+          ${pct > 0 && this.rec!.kind === "file" ? `<button data-act="reanalyse" data-id="${s.id}" title="Discard this segment’s results and analyse it again with the current version">Re-analyse</button>` : ""}
           <button data-act="delete" data-id="${s.id}" aria-label="Remove segment">Remove</button>
         </div></li>`;
     }).join("") : `<li class="muted">No segments yet. Add the part of the exam you want to look at.</li>`;
@@ -1242,7 +1317,9 @@ export class App {
       <dt>Blinks removed</dt><dd>${this.rec.settings.blinkFilter ? m.blinksRemoved.toLocaleString() : "off"}</dd>
       <dt>Head direction signs</dt><dd>${m.headSignNote}</dd>
       <dt>Screen centre</dt><dd>${m.screenH.toFixed(0)}° horizontal, ${m.screenV.toFixed(0)}° vertical from the camera</dd>
-      <dt>Gaze available</dt><dd>${Math.round(m.validFraction * 100)}% of analysed frames; ${Math.round(m.screenFraction * 100)}% of those near the screen centre</dd>` : "<dt>Model</dt><dd>Not fitted yet.</dd>";
+      <dt>Gaze available</dt><dd>${Math.round(m.validFraction * 100)}% of analysed frames; ${Math.round(m.screenFraction * 100)}% of those near the screen centre</dd>
+      <dt>No gaze because</dt><dd>${missingText(m.missing)}</dd>
+      <dt>Brightened</dt><dd>${Math.round(m.brightened * 100)}% of frames were dim and brightened before tracking</dd>` : "<dt>Model</dt><dd>Not fitted yet.</dd>";
   }
 
   private renderBusy(started?: number) {
@@ -1268,6 +1345,17 @@ export class App {
 }
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
+
+function missingText(m: { noFace: number; eyesOut: number; eyesClosed: number; olderAnalysis: number }): string {
+  const pc = (x: number) => `${x < 0.005 && x > 0 ? "<1" : Math.round(x * 100)}%`;
+  const parts = [
+    m.noFace ? `no face found ${pc(m.noFace)}` : "",
+    m.eyesOut ? `eyes out of frame ${pc(m.eyesOut)}` : "",
+    m.eyesClosed ? `eyes closed or not measurable ${pc(m.eyesClosed)}` : "",
+    m.olderAnalysis ? `not recorded (analysed by an earlier version; re-analyse to see) ${pc(m.olderAnalysis)}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join("; ") : "nothing missing";
+}
 
 /**
  * Stops the same recording being open in two windows (each would analyse the same parts

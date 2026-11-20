@@ -1,5 +1,6 @@
 import type { MediaPipeFaceTracker } from "../tracking/MediaPipeFaceTracker";
-import { fpDistance, Fingerprinter, meanAbsDiff, measure, RunBuilder } from "../analysis/frame";
+import { fpDistance, Fingerprinter, meanAbsDiff, measure, RunBuilder, whyInvalid } from "../analysis/frame";
+import { FramePrep, meanOf } from "../video/prepare";
 import { normalise, type Interval } from "../analysis/intervals";
 import { trackerClock } from "../video/analyse";
 import { FP_SIZE, type Run } from "../store/types";
@@ -30,8 +31,8 @@ export class ScreenCapture {
   stream: MediaStream | null = null;
   video: HTMLVideoElement;
   private crop: Crop | null = null;
-  private canvas = document.createElement("canvas");
-  private ctx = this.canvas.getContext("2d")!;
+  private prep = new FramePrep();
+  private preview = document.createElement("canvas");
   private fpr = new Fingerprinter();
   private builder: RunBuilder | null = null;
   private prevMid: Uint8Array | null = null;
@@ -100,18 +101,23 @@ export class ScreenCapture {
     this.recent.push(now);
     while (this.recent.length && this.recent[0] < now - 1000) this.recent.shift();
 
-    if (this.canvas.width !== c.w || this.canvas.height !== c.h) { this.canvas.width = c.w; this.canvas.height = c.h; }
-    this.ctx.drawImage(this.video, c.x, c.y, c.w, c.h, 0, 0, c.w, c.h);
-    let values = null;
+    let values = null, why = 1;
     try {
-      values = measure(this.tracker.detect(this.canvas, trackerClock.at(this.videoT)).raw);
+      const frame = this.prep.draw(this.video, c.w, c.h, meanOf(mid), c);
+      const raw = this.prep.unmap(this.tracker.detect(frame, trackerClock.at(this.videoT)).raw);
+      values = measure(raw, this.prep.gain);
+      why = whyInvalid(raw);
     } catch (e) { console.warn("capture tracking", e); }
-    this.builder.push(this.videoT, values, this.fpr.fingerprint());
+    this.builder.push(this.videoT, values, this.fpr.fingerprint(), why, this.prep.gain);
     this.status.uniqueFrames++;
     if (values) this.status.faceFrames++;
     this.status.videoT = this.videoT;
     this.status.sourceFps = this.recent.length;
-    this.onFrame?.(this.canvas);
+    if (this.onFrame) {
+      if (this.preview.width !== c.w || this.preview.height !== c.h) { this.preview.width = c.w; this.preview.height = c.h; }
+      this.preview.getContext("2d")!.drawImage(this.video, c.x, c.y, c.w, c.h, 0, 0, c.w, c.h);
+      this.onFrame(this.preview);
+    }
     this.onStatus?.(this.status);
   }
 

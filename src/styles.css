@@ -141,7 +141,7 @@ td .swatch { margin-left: 0; }
 .segments li { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 7px 8px; border-radius: 6px; }
 .segments li.selected { background: var(--field); box-shadow: inset 3px 0 0 var(--accent); }
 .seg-main { display: flex; flex-direction: column; min-width: 0; }
-.seg-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.seg-actions { display: flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .seg-actions button { padding: 3px 8px; font-size: 13px; }
 .seg-form { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; border-top: 1px solid var(--rule); padding-top: 10px; }
 

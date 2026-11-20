@@ -1,6 +1,15 @@
-// Copied from UC_TFR (src/tracking/MediaPipeFaceTracker.ts). Change: detect() accepts any
-// frame source (canvas, OffscreenCanvas, VideoFrame) so decoded video can be analysed.
+// Copied from UC_TFR (src/tracking/MediaPipeFaceTracker.ts). Changes: detect() accepts any
+// frame source (canvas, OffscreenCanvas, VideoFrame) so decoded video can be analysed, and
+// lower detection/tracking thresholds (see THRESHOLDS) for dim, low-angle exam webcams.
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
+
+/**
+ * UC_TFR uses 0.5 / 0.6 / 0.6, tuned for a well-lit face filling a clinic camera. Exam
+ * recordings are often dim, shot from below, with the face partly out of frame, and a
+ * lost face only comes back when the detector finds it again, so the thresholds are
+ * lower here. Wrong landmarks show up on the eye overlay and as gaze far off the plane.
+ */
+const THRESHOLDS = { minFaceDetectionConfidence: 0.3, minFacePresenceConfidence: 0.4, minTrackingConfidence: 0.4 };
 import type { RawFace } from "./FeatureExtractor";
 
 /** Fallback used only if the locally bundled model is missing (e.g. `npm run setup` not run). */
@@ -80,9 +89,7 @@ export class MediaPipeFaceTracker {
       baseOptions: { modelAssetBuffer: this.model!, delegate: cfg.delegate },
       runningMode: "VIDEO",
       numFaces: 1,
-      minFaceDetectionConfidence: 0.5,
-      minFacePresenceConfidence: 0.6,
-      minTrackingConfidence: 0.6,
+      ...THRESHOLDS,
       outputFaceBlendshapes: true,
       outputFacialTransformationMatrixes: true,
     });

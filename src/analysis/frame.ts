@@ -5,10 +5,23 @@ import type { Interval } from "./intervals";
 
 export type FrameValues = Record<Field, number>;
 
+/** Codes stored in the "why" column. */
+export const WHY = { ok: 0, noFace: 1, eyesOut: 2 } as const;
+
+/**
+ * Only the eyes need to be inside the frame. (UC_TFR also requires the forehead, chin and
+ * face edges, which rejects every frame where a low laptop camera cuts off the chin.)
+ */
+const EYE_POINTS = [LM.rEyeOuter, LM.rEyeInner, LM.lEyeInner, LM.lEyeOuter, LM.rIrisCentre, LM.lIrisCentre];
+
+export function whyInvalid(raw: RawFace | undefined): number {
+  return raw ? WHY.eyesOut : WHY.noFace;
+}
+
 /** Turns one tracker result into the stored measurements, or null if no usable face. */
-export function measure(raw: RawFace | undefined): FrameValues | null {
+export function measure(raw: RawFace | undefined, gain = 1): FrameValues | null {
   if (!raw) return null;
-  const s = extractFeatures(raw, 0, 0);
+  const s = extractFeatures(raw, 0, 0, EYE_POINTS);
   if (!s.valid) return null;
   const f = s.features;
   const n = raw.landmarks;
@@ -25,6 +38,8 @@ export function measure(raw: RawFace | undefined): FrameValues | null {
     openL: open(LM.lEyeOuter, LM.lEyeInner, LM.lEyeUpper, LM.lEyeLower),
     openR: open(LM.rEyeOuter, LM.rEyeInner, LM.rEyeUpper, LM.rEyeLower),
     jaw: v(raw.blendshapes?.jawOpen),
+    why: WHY.ok,
+    gain,
   };
 }
 
@@ -36,10 +51,11 @@ export class RunBuilder {
   private fps: Uint8Array[] = [];
   constructor(private recId: string, private interval: Interval, private approx = false) {}
   get count() { return this.t.length; }
-  push(t: number, values: FrameValues | null, fp: Uint8Array) {
+  /** why: reason code when values is null (see WHY). */
+  push(t: number, values: FrameValues | null, fp: Uint8Array, why: number = WHY.noFace, gain = 1) {
     this.t.push(t);
     this.valid.push(values ? 1 : 0);
-    for (const k of FIELDS) this.cols[k].push(values ? values[k] : NaN);
+    for (const k of FIELDS) this.cols[k].push(values ? values[k] : k === "why" ? why : k === "gain" ? gain : NaN);
     this.fps.push(fp);
   }
   /** end: where this run's coverage stops, if not the end of the interval it was started with. */
@@ -113,8 +129,11 @@ export class Fingerprinter {
   drawMid(src: CanvasImageSource, crop?: { x: number; y: number; w: number; h: number }): Uint8Array {
     if (crop) this.mctx.drawImage(src, crop.x, crop.y, crop.w, crop.h, 0, 0, 64, 48);
     else this.mctx.drawImage(src, 0, 0, 64, 48);
-    return grey(this.mctx.getImageData(0, 0, 64, 48).data);
+    this.lastMid = grey(this.mctx.getImageData(0, 0, 64, 48).data);
+    return this.lastMid;
   }
+  /** The last 64×48 greyscale image from drawMid. */
+  lastMid: Uint8Array = new Uint8Array(0);
   /** Call after drawMid. */
   fingerprint(): Uint8Array {
     this.sctx.drawImage(this.mid, 0, 0, FP_W, FP_H);

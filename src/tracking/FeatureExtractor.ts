@@ -1,4 +1,5 @@
-// Copied unchanged from UC_TFR (src/tracking/FeatureExtractor.ts). Keep in step with that repo.
+// Copied from UC_TFR (src/tracking/FeatureExtractor.ts). One change: extractFeatures() takes
+// an optional list of the landmarks that must lie inside the frame (default unchanged).
 import { LM, LANDMARK_COUNT_WITH_IRIS, EDGE_CHECK_POINTS } from "./landmarks";
 import type { FeatureVector, GazeGeometry, TrackingSample } from "./TrackingSample";
 
@@ -91,12 +92,12 @@ export function headToCamera(m: number[]): { h: number; v: number } | null {
   return Number.isFinite(h) && Number.isFinite(v) ? { h, v } : null;
 }
 
-export function extractFeatures(face: RawFace, frameTimeMs: number, now: number): TrackingSample {
+export function extractFeatures(face: RawFace, frameTimeMs: number, now: number, edgePoints: readonly number[] = EDGE_CHECK_POINTS): TrackingSample {
   const n = face.landmarks;
   const base: TrackingSample = { frameTimeMs, timestampMs: now, valid: false, features: {} };
   if (!n || n.length < 468) return { ...base, invalidReason: "no-face" };
 
-  for (const i of EDGE_CHECK_POINTS) {
+  for (const i of edgePoints) {
     const p = n[i];
     if (p.x < EDGE_MARGIN || p.x > 1 - EDGE_MARGIN || p.y < EDGE_MARGIN || p.y > 1 - EDGE_MARGIN) {
       return { ...base, invalidReason: "face-at-edge", debugLandmarks: n };

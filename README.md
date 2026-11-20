@@ -54,6 +54,8 @@ On a slow computer live tracking can make playback stutter; turn it off, or use 
 
 Add the parts of the exam you want to look at (*From*, *to*, optional label; *Now* takes the current playback time). Each segment is analysed once. A new segment that overlaps earlier ones only analyses the part not already done, and removing a segment deletes the frames no other segment still covers.
 
+*Fill gaps* analyses again only the stretches of a segment where the face wasn't tracked (at least 0.5 s long; stretches less than 5 s apart are done together, since each needs a seek and a 1 s lead-in) and keeps every frame that has gaze. *Re-analyse* discards all of a segment's results and analyses it again. Both keep regions.
+
 Analysis is saved as it goes, every 30 s of video. *Stop* keeps everything analysed up to that moment, and *Analyse* on the segment carries on from there, so nothing is lost by stopping or by closing the page mid-analysis (at most the last 30 s if the page is closed).
 
 The strip across the top of the timeline shows the whole recording: segments above, analysed parts shaded. Click a segment there or press *Show* to look at that segment alone.
@@ -122,6 +124,15 @@ Each video can be open in its own window, and analyses in hidden tabs and minimi
 
 The face tracker and feature extraction come from UC_TFR (`src/tracking/`): MediaPipe Face Landmarker gives head orientation (relative to the face-to-camera line, so moving in the seat doesn't count as turning), the model's per-eye gaze estimates (blendshapes), iris position within each eye, blink scores and lid opening. All of it is stored per frame, with a 16×12 thumbnail fingerprint used to align screen captures.
 
+Exam webcams are often dim and low, with the chin or forehead out of the picture, so each frame is prepared before tracking (`src/video/prepare.ts`):
+
+- **Padding.** The frame is drawn with a grey border of 15% on every side, because the face detector misses faces that run off the edge of the picture. Landmarks are mapped back to the original frame, and the head-pose translation is rescaled to undo the padding's effect on the pose model's assumed field of view.
+- **Brightening.** Frames with a mean grey level below 95/255 are brightened towards 120 (at most 2.2×) with slightly more contrast.
+- **Only the eyes must be in frame.** UC_TFR rejects a face if its forehead, chin, sides or nose touch the edge; here only the eye corners and irises must be inside the frame.
+- **Lower thresholds.** Face detection, presence and tracking confidence are 0.3, 0.4 and 0.4 (UC_TFR uses 0.5, 0.6 and 0.6), so dim or partly hidden faces are kept rather than dropped.
+
+The model panel reports why frames have no gaze (no face found, eyes out of frame, eyes closed or not measurable) and how many frames were brightened. On a test clip with the chin cut off and the picture darkened, gaze was available in 1% of frames with UC_TFR's settings and 100% with these.
+
 ### From head and eyes to gaze
 
 ```
@@ -131,7 +142,7 @@ gazeH = sH·headH + kH·eyeH        gazeV = sV·headV + kV·eyeV
 - **sH, sV** fix the tracker's head-angle sign conventions, from the correlation with the nose position in the image.
 - **k** converts the eye measure to degrees. While the student reads the screen, head movements are offset by opposite eye movements, so within the screen cluster `eye = (target − head)/k`. The fit regresses eye on head, `k = −var(head)/cov(eye, head)`. Regressing head on eye instead would be biased towards zero by how much the reading position moves around the screen. The fitted value is used when there are at least 200 on-screen frames, |r| > 0.3 and it lies within 0.4–2.5 times the prior. Otherwise the prior is used, and the model panel says why. Priors are 40°/unit for the face model's estimate (as in UC_TFR) and 140°/unit for iris position (about a 12 mm eyeball radius against a 30 mm eye width). Both scales can be set by hand.
 - **The screen** is the densest region of a smoothed 1° histogram of gaze, with frames within 12° of it treated as on-screen while fitting.
-- **Posture drift** is followed by re-centring on the median of on-screen frames over a moving window (60 s by default), so slumping or a nudged laptop lid doesn't move the clusters.
+- **Posture drift** is followed by re-centring on the median of on-screen frames over a moving window (60 s by default), so slumping, moving in the seat or a nudged laptop lid doesn't move the clusters. Where a stretch has too few on-screen frames, the nearest stretch that has them is used. Head direction is measured relative to the line from the face to the camera, so moving around the frame without turning doesn't count as looking elsewhere.
 - **Blinks** are removed as described above. Where the eyes can't be measured at all, the last eye position is held for up to 300 ms.
 
 The fitting is repeated whenever segments are added, using the saved measurements; the face tracker is not re-run.

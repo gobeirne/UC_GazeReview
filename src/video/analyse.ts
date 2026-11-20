@@ -1,5 +1,6 @@
 import type { MediaPipeFaceTracker } from "../tracking/MediaPipeFaceTracker";
-import { Fingerprinter, measure, RunBuilder } from "../analysis/frame";
+import { Fingerprinter, measure, RunBuilder, whyInvalid } from "../analysis/frame";
+import { FramePrep, meanOf } from "./prepare";
 import type { Interval } from "../analysis/intervals";
 import type { Run } from "../store/types";
 import { medianFrameInterval, type ByteSource, type WebmIndex } from "./webm";
@@ -98,19 +99,22 @@ export async function analyseGap(
   decoder.configure(cfg);
   clock.begin(frames[first].t);
 
+  const prep = new FramePrep();
   const process = (f: VideoFrame) => {
     const t = f.timestamp / 1000;
     try {
       if (t >= gap.start - WARMUP_MS && t < gap.end) {
-        const res = tracker.detect(f, clock.at(t));
+        const mid = fpr.drawMid(f);
+        const res = tracker.detect(prep.draw(f, f.displayWidth, f.displayHeight, meanOf(mid)), clock.at(t));
+        const raw = prep.unmap(res.raw);
         if (t >= gap.start) {
           if (t >= chunkStart + CHUNK_MS && builder.count) {
             onChunk(builder.finish(t));
             chunkStart = t;
             builder = new RunBuilder(recId, { start: t, end: gap.end });
           }
-          fpr.drawMid(f);
-          builder.push(t, measure(res.raw), fpr.fingerprint());
+          const values = measure(raw, prep.gain);
+          builder.push(t, values, fpr.fingerprint(), whyInvalid(raw), prep.gain);
           lastT = t; count++;
           onProgress({ done: count, total, tMs: t });
         }
