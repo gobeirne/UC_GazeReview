@@ -81,6 +81,15 @@ export interface RecordingSettings {
   distanceCorrection: boolean;
   /** Looks shorter than this (ms) are left out of the event-timeline analysis. */
   minLookMs: number;
+  /** Looks with fewer frames than this inside the chosen region are left out (0 = any). */
+  minRegionFrames: number;
+  /**
+   * How looks are formed for the event-timeline analysis. "standard": runs of frames away from the
+   * screen region(s). "stretches": the way the first exported figures counted, with every region
+   * treated as an ordinary region, so a look is a long stretch credited to the region it spends
+   * most frames in; brief crossings into a region don't count.
+   */
+  lookMode: "standard" | "stretches";
 }
 
 export const DEFAULT_SETTINGS: RecordingSettings = {
@@ -95,6 +104,8 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   blinkMaxMs: 400,
   distanceCorrection: true,
   minLookMs: 0,
+  minRegionFrames: 0,
+  lookMode: "standard",
 };
 
 /** How video time relates to the clock times of an event timeline. */

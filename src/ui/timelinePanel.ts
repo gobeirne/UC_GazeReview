@@ -6,7 +6,7 @@ import type { Recording, Region } from "../store/types";
 import { answerLabel, checkTimeline, clockMs, clockStamp, previousAnswer, type StoredTimeline, type TimelineEvent } from "../timeline/eventTimeline";
 import { looksLikeHtml, parseMoodleReview } from "../timeline/moodleReview";
 import { cssVar, download, downloadBlob, esc, fitCanvas, fmtTime } from "./util";
-import { dwell, ELSEWHERE, SCREEN } from "../analysis/events";
+import { classify, dwell, ELSEWHERE, findEvents, SCREEN } from "../analysis/events";
 import { totalLength } from "../analysis/intervals";
 import { drawFigure } from "../report/figure";
 import { buildCsv, buildReportHtml, figureCaption, type EventRow, type ReportData } from "../report/report";
@@ -160,6 +160,14 @@ export class TimelinePanel {
     }
     if (t.id === "tl-order") this.dateOrder = t.value as "dmy" | "mdy";
     if (t.id === "tl-region") { this.region = t.value; this.renderAnalysis(); }
+    if (t.id === "tl-minframes" || t.id === "tl-lookmode") {
+      const rec = this.host.rec();
+      if (rec) {
+        if (t.id === "tl-minframes") rec.settings.minRegionFrames = Number(t.value);
+        else rec.settings.lookMode = t.value as "standard" | "stretches";
+        await this.host.save(); this.renderAnalysis(); this.host.redraw();
+      }
+    }
     if (t.id === "tl-minlook") {
       const rec = this.host.rec();
       if (rec) { rec.settings.minLookMs = Number(t.value); await this.host.save(); this.renderAnalysis(); this.host.redraw(); }
@@ -172,14 +180,19 @@ export class TimelinePanel {
     const rec = this.host.rec();
     const { gaze, labels, glances, regions, coverage } = this.host.analysis();
     if (!rec?.timeline || !this.synced() || !gaze || !labels) { this.host.say("Analyse the video and line up the event timeline first."); return null; }
-    if (!regions.some((r) => r.isScreen)) { this.host.say("No region is marked as the screen, so looks can’t be counted properly. Tick “Screen” for the screen region in the Regions panel, then export again."); return null; }
+    if (rec.settings.lookMode !== "stretches" && !regions.some((r) => r.isScreen)) { this.host.say("No region is marked as the screen, so looks can’t be counted properly. Tick “Screen” for the screen region in the Regions panel, then export again."); return null; }
     const evs = rec.timeline.data.events;
     const times = evs.map((e) => this.videoTime(e));
     const sel = this.selectedLooks(glances, rec.settings.minLookMs);
     const peri = periEvent(times, sel.map((g) => g.start), coverage, rec.frameIntervalMs, sel.map((g) => g.end - g.start));
     if (!peri.events) { this.host.say("No saved responses have the minute before them analysed yet, so there’s nothing to report."); return null; }
     const where = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
-    const target = rec.settings.minLookMs ? `${where} (looks of ${rec.settings.minLookMs / 1000} s or longer)` : where;
+    const conds = [
+      rec.settings.minLookMs ? `${rec.settings.minLookMs / 1000} s or longer` : "",
+      rec.settings.minRegionFrames && this.region !== "any" ? `${rec.settings.minRegionFrames}+ frames in the region` : "",
+      rec.settings.lookMode === "stretches" ? "counted as stretches" : "",
+    ].filter(Boolean);
+    const target = conds.length ? `${where} (${conds.join(", ")})` : where;
     const d = dwell(gaze, labels, -Infinity, Infinity);
     const ok = (() => { let n = 0; for (let k = 0; k < gaze.n; k++) n += gaze.ok[k]; return n; })();
     const named = regions.map((r, i) => ({ r, i })).filter(({ r }) => !r.isScreen);
@@ -190,7 +203,7 @@ export class TimelinePanel {
       const lastLook: Record<string, number | null> = {};
       for (const { r, i: ri } of named) {
         let best: number | null = null;
-        for (const g of glances) if (g.region === ri && g.end - g.start >= rec.settings.minLookMs && g.start <= t && g.start >= t - BEFORE) best = best === null ? t - g.start : Math.min(best, t - g.start);
+        for (const g of this.looksFor(glances)) if (g.region === ri && g.end - g.start >= rec.settings.minLookMs && (!rec.settings.minRegionFrames || (g.inRegion?.[ri] ?? 0) >= rec.settings.minRegionFrames) && g.start <= t && g.start >= t - BEFORE) best = best === null ? t - g.start : Math.min(best, t - g.start);
         lastLook[r.name] = best;
       }
       const change = e.change_type === "revision" ? `${prev ? answerLabel(prev, 20) : "?"} → ${answerLabel(e, 20)}` : e.change_type === "resave" ? "same again" : "first";
@@ -231,9 +244,28 @@ export class TimelinePanel {
     if (kind === "export-csv") download(`${base}-responses.csv`, buildCsv(d), "text/csv");
   }
 
-  /** Looks to the chosen region (or anywhere off screen) lasting at least minMs. */
+  /** Looks as formed for this analysis: the app's looks, or "stretches" (every region treated as ordinary). */
+  private looksFor(glances: GazeEvent[]): GazeEvent[] {
+    const rec = this.host.rec();
+    const { gaze, regions } = this.host.analysis();
+    if (rec?.settings.lookMode !== "stretches" || !gaze) return glances;
+    const key = `${gaze.n}:${gaze.t[0]}:${gaze.h[0]}:${JSON.stringify(regions)}:${rec.settings.minFrames}`;
+    if (this.stretchCache?.key !== key) {
+      const lab = classify(gaze, regions.map((r) => ({ ...r, isScreen: false })));
+      this.stretchCache = { key, looks: findEvents(gaze, lab, rec.settings.minFrames) };
+    }
+    return this.stretchCache.looks;
+  }
+  private stretchCache: { key: string; looks: GazeEvent[] } | null = null;
+
+  /** Looks to the chosen region (or anywhere off screen), lasting at least minMs, with enough frames in the region. */
   private selectedLooks(glances: GazeEvent[], minMs: number): GazeEvent[] {
-    return glances.filter((g) => (this.region === "any" || String(g.region) === this.region) && g.end - g.start >= minMs);
+    const s = this.host.rec()?.settings;
+    const minFrames = s?.minRegionFrames ?? 0;
+    return this.looksFor(glances).filter((g) =>
+      (this.region === "any" || String(g.region) === this.region) &&
+      g.end - g.start >= minMs &&
+      (!minFrames || this.region === "any" || (g.inRegion?.[Number(this.region)] ?? 0) >= minFrames));
   }
 
   select(i: number) {
@@ -299,7 +331,9 @@ export class TimelinePanel {
       <div class="tl-analysis" ${synced ? "" : "hidden"}>
         <h4>Looks away around events</h4>
         <div class="row small"><label>Count looks to <select id="tl-region"></select></label>
-          <label>lasting at least <select id="tl-minlook">${[[0, "any length"], [100, "0.1 s"], [200, "0.2 s"], [300, "0.3 s"], [500, "0.5 s"], [1000, "1 s"]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></label></div>
+          <label>lasting at least <select id="tl-minlook">${[[0, "any length"], [100, "0.1 s"], [200, "0.2 s"], [300, "0.3 s"], [500, "0.5 s"], [1000, "1 s"]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></label>
+          <label>with at least <select id="tl-minframes">${[0, 2, 3, 5, 7, 10].map((v) => `<option value="${v}">${v ? `${v} frames` : "any frames"}</option>`).join("")}</select> in the region</label>
+          <label>Looks formed <select id="tl-lookmode"><option value="standard">as away from the screen</option><option value="stretches">as stretches, by most frames (earlier figures)</option></select></label></div>
         <canvas id="tl-hist" aria-label="Looks away before and after events"></canvas>
         <p id="tl-hist-note" class="small"></p>
         <div class="row">
@@ -329,6 +363,10 @@ export class TimelinePanel {
     const chosen = this.selectedLooks(glances, minLook);
     const minSel = this.box.querySelector<HTMLSelectElement>("#tl-minlook");
     if (minSel) minSel.value = String(minLook);
+    const mfSel = this.box.querySelector<HTMLSelectElement>("#tl-minframes");
+    if (mfSel) mfSel.value = String(rec.settings.minRegionFrames ?? 0);
+    const modeSel = this.box.querySelector<HTMLSelectElement>("#tl-lookmode");
+    if (modeSel) modeSel.value = rec.settings.lookMode ?? "standard";
     const synced = this.synced();
     const evs = rec.timeline.data.events;
     const dt = rec.frameIntervalMs;
@@ -357,7 +395,7 @@ export class TimelinePanel {
     const table = this.box.querySelector(".tl-table");
     if (table) table.innerHTML = `<table><thead><tr><th>Video</th><th>Clock</th><th>Item</th><th>Saved</th><th>Change</th><th>Last look away before</th></tr></thead><tbody>${rows}</tbody></table>`;
     if (!synced || !gaze) { this.drawHist(null); return; }
-    if (regions.length && !regions.some((r) => r.isScreen)) {
+    if (rec.settings.lookMode !== "stretches" && regions.length && !regions.some((r) => r.isScreen)) {
       this.drawHist(null);
       const note = this.box.querySelector("#tl-hist-note");
       if (note) note.innerHTML = `<span class="warn-line">No region is marked as the screen, so looks can’t be counted. Tick “Screen” for the screen region in the Regions panel.</span>`;

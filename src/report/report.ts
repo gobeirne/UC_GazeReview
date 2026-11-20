@@ -122,7 +122,11 @@ ${items ? `<h2>Item wording</h2><dl class="items">${items}</dl>` : ""}
 ${m.distanceCorrected ? "Angles were rescaled to the person’s usual distance from the camera to allow for leaning in and out." : "Angles were not corrected for distance from the camera."}
 Slow posture changes were followed over a ${s.driftWindowS} s window.
 ${s.blinkFilter ? `Blinks (lids below ${s.blinkLidPct}% of usual for up to ${s.blinkMaxMs} ms) were removed from the eye trace (${m.blinksRemoved} removed).` : "Blinks were not removed."}
-Regions were drawn by the reviewer on the gaze plane.</p>
+Regions were drawn by the reviewer on the gaze plane.
+${s.lookMode === "stretches"
+  ? "For the event analysis, looks were formed with every region treated as an ordinary region: a look is a stretch of frames outside the main on-screen cluster, credited to the region it spends most frames in, so brief crossings into a region are not counted separately."
+  : `A look is a run of at least ${s.minFrames} frames away from the screen region, credited to the labelled region it spends most frames in.`}
+${s.minLookMs ? ` Looks shorter than ${s.minLookMs / 1000} s were left out.` : ""}${s.minRegionFrames ? ` Looks with fewer than ${s.minRegionFrames} frames inside the region were left out.` : ""}</p>
 <p>For the test, each saved response with its whole window analysed was counted as having a look if a look to ${esc(d.target)} started in the ${JUST_BEFORE / 1000} s before it. Chance was estimated by placing the same number of responses at random times in the analysed video ${SHUFFLES} times (fixed seed) and counting the same way. The p value is the share of placements with at least as many responses with a look, with one added to both counts.</p>
 
 <h2>Limits</h2>

@@ -16,6 +16,8 @@ export interface GazeEvent {
   peakDist: number;
   /** Smallest lid opening during the event relative to the person's median (1 = typical). Low values suggest a blink or a look down rather than a look across. */
   lidMin: number;
+  /** Frames inside each labelled region during the look (region index → frames). */
+  inRegion: Record<number, number>;
 }
 
 /**
@@ -55,7 +57,7 @@ export function findEvents(g: GazeSeries, lab: Int16Array, minFrames: number, br
     if (cur && cur.n >= minFrames) {
       let region = ELSEWHERE, best = 0;
       for (const [r, c] of cur.counts) if (r >= 0 && c > best) { best = c; region = r; }
-      events.push({ start: g.t[cur.s], end: g.t[cur.e] + dt, frames: cur.n, region, peakH: g.h[cur.pk], peakV: g.v[cur.pk], peakDist: cur.pd, lidMin: cur.lid });
+      events.push({ start: g.t[cur.s], end: g.t[cur.e] + dt, frames: cur.n, region, peakH: g.h[cur.pk], peakV: g.v[cur.pk], peakDist: cur.pd, lidMin: cur.lid, inRegion: Object.fromEntries([...cur.counts].filter(([r]) => r >= 0)) });
     }
     cur = null; noneRun = 0;
   };
