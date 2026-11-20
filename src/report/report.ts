@@ -1,4 +1,4 @@
-import { median, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
+import { median, positionSentence, pText, SHUFFLES, type PeriResult, type PositionResult } from "../analysis/periEvent";
 import type { GazeModelInfo } from "../analysis/gazeModel";
 import type { Recording } from "../store/types";
 import type { TimelineEvent } from "../timeline/eventTimeline";
@@ -28,6 +28,7 @@ export interface ReportData {
   includeText: boolean;
   figurePng: string;
   caption: string;
+  positions?: PositionResult;
 }
 
 /** One-sentence result used in the figure caption and the report. */
@@ -38,9 +39,9 @@ export function resultSentence(target: string, p: PeriResult): string {
     (p.latencies.length ? ` Median time from the last such look to the save: ${(lat / 1000).toFixed(1)} s.` : "");
 }
 
-export function figureCaption(target: string, p: PeriResult, panelA: "aligned" | "staircase" = "aligned"): string {
-  if (panelA === "staircase") return `A: Each row is one save moment, in order (several items saved together share a row; * = a changed response). The light bar is the time from the previous save to this one, the shaded end of it the ${p.windowMs / 1000} s before the save, the blue line the save, and the dark bars looks to ${target}. ` +
-    `B: Where gaze fell during the timeline, with the labelled regions. ` + resultSentence(target, p) + " A saved response marks when the answer was submitted, not when it was chosen.";
+export function figureCaption(target: string, p: PeriResult, panelA: "aligned" | "staircase" = "aligned", pos?: PositionResult): string {
+  if (panelA === "staircase") return `A: Each row is one save moment, in order (several items saved together share a row; * = a changed response). The bar is the time from the previous save to this one (grey where not analysed), with its last ${p.windowMs / 1000} s shaded; the blue line is the save and the dark bars are looks to ${target}. Below, left: where in its item each look started, against an even spread; right: looks per 5 s around the saves, with the range expected by chance. ` +
+    `B: Where gaze fell during the timeline, with the labelled regions. ` + (pos?.items ? positionSentence(target, pos) + " " : "") + resultSentence(target, p) + " A saved response marks when the answer was submitted, not when it was chosen.";
   return `A: Each row is one save moment with an analysed minute before it (several items saved together share a row; * = a changed response); each tick is a look to ${target}, ` +
     `aligned to the moment the response was saved (dashed line); the shaded strip is the ${p.windowMs / 1000} s before. Below, looks per 5 s bin with the range expected if ` +
     `the responses had been saved at random times. B: Where gaze fell over the whole analysed video, with the labelled regions. ` +
@@ -85,6 +86,7 @@ export function buildReportHtml(d: ReportData): string {
 <p class="muted">${esc(rec.name)}${rec.fileName ? ` · ${esc(rec.fileName)}` : ""} · generated ${now.toLocaleString("en-NZ")}</p>
 
 <h2>Result</h2>
+${d.positions?.items ? `<p class="result">${esc(positionSentence(d.target, d.positions))}</p>` : ""}
 <p class="result">${esc(resultSentence(d.target, d.peri))}</p>
 
 <h2>Summary</h2>
@@ -130,6 +132,8 @@ ${s.lookMode === "stretches"
   : `A look is a run of at least ${s.minFrames} frames away from the screen region, credited to the labelled region it spends most frames in.`}
 ${s.minLookMs ? ` Looks shorter than ${s.minLookMs / 1000} s were left out.` : ""}${s.minRegionFrames ? ` Looks with fewer than ${s.minRegionFrames} frames inside the region were left out.` : ""}</p>
 <p>For the test, each saved response with its whole window analysed was counted as having a look if a look to ${esc(d.target)} started in the ${d.peri.windowMs / 1000} s before it. Chance was estimated by placing the same number of responses at random times in the analysed video ${SHUFFLES} times (fixed seed) and counting the same way. The p value is the share of placements with at least as many responses with a look, with one added to both counts.</p>
+
+<p>Where in each item looks fell needs no window: each item runs from the previous save to its own, and a look's position is how far through the item it started. Each item with looks contributes the median position of its looks, so a burst of looks within one item counts once. The main test compares the average of these values with the 50% expected if looks were unrelated to answering, using 100,000 simulations in which each item's value is a single random position; treating each item's looks as one burst in this way gives the widest spread chance could have, so the test does not overstate the result. A one-sided sign test (items above halfway) is given as well. Only items analysed from start to end are used.</p>
 
 <h2>Limits</h2>
 <ul>

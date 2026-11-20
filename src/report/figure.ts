@@ -1,4 +1,4 @@
-import { AFTER, BEFORE, BIN, SHUFFLES, type PeriResult } from "../analysis/periEvent";
+import { AFTER, BEFORE, BIN, SHUFFLES, type PeriResult, type PositionResult } from "../analysis/periEvent";
 import type { GazeSeries } from "../analysis/gazeModel";
 import type { Region } from "../store/types";
 
@@ -22,6 +22,10 @@ export interface FigureData {
   staircase?: { t0: number; t1: number; rows: { label: string; changed: boolean; from: number; to: number; looks: [number, number][] }[] };
   /** Only frames in this video span go into panel B's heatmap. */
   heatSpan?: { start: number; end: number };
+  /** Where in each item looks fall (staircase panel). */
+  positions?: PositionResult;
+  /** Analysed parts of the video, to show unanalysed time on the staircase. */
+  coverage?: { start: number; end: number }[];
 }
 
 // Fixed light palette: the figure is for documents and email, whatever the app's theme.
@@ -32,9 +36,9 @@ const C = {
 };
 const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
 
-/** Draws the two-panel figure at 1600×1000 logical pixels, scaled for print. */
+/** Draws the two-panel figure at 1600×1080 logical pixels, scaled for print. */
 export function drawFigure(data: FigureData, scale = 2): HTMLCanvasElement {
-  const W = 1600, H = 1000;
+  const W = 1600, H = 1080;
   const cv = document.createElement("canvas");
   cv.width = W * scale; cv.height = H * scale;
   const ctx = cv.getContext("2d")!;
@@ -95,7 +99,13 @@ function drawPanelA(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
   ctx.fillStyle = C.muted; font(14); ctx.textAlign = "center";
   ctx.fillText(`Saved responses (${p.events}), in order`, 0, 0); ctx.restore();
 
-  // Histogram with chance band.
+  drawPeriHist(ctx, p, { L, R, top: histTop, bottom: histBottom, axisX: b.x + 14 }, font, true);
+}
+
+/** Looks per 5 s around saves, with the chance band. */
+function drawPeriHist(ctx: CanvasRenderingContext2D, p: PeriResult, g: { L: number; R: number; top: number; bottom: number; axisX: number }, font: FontFn, wideLegend: boolean) {
+  const { L, R } = g, histTop = g.top, histBottom = g.bottom;
+  const X = (ms: number) => L + ((ms + BEFORE) / (BEFORE + AFTER)) * (R - L);
   const nb = p.observed.length;
   const max = Math.max(1, ...p.observed, ...p.hi);
   const Y = (v: number) => histBottom - (v / max) * (histBottom - histTop);
@@ -103,26 +113,28 @@ function drawPanelA(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
   ctx.fillStyle = C.band;
   for (let i = 0; i < nb; i++) ctx.fillRect(XB(i), Y(p.hi[i]), XB(i + 1) - XB(i), Y(p.lo[i]) - Y(p.hi[i]));
   ctx.fillStyle = C.bar;
-  for (let i = 0; i < nb; i++) ctx.fillRect(XB(i) + 3, Y(p.observed[i]), XB(i + 1) - XB(i) - 6, histBottom - Y(p.observed[i]));
+  for (let i = 0; i < nb; i++) ctx.fillRect(XB(i) + 2, Y(p.observed[i]), XB(i + 1) - XB(i) - 4, histBottom - Y(p.observed[i]));
   ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath();
   for (let i = 0; i < nb; i++) { ctx.moveTo(XB(i), Y(p.mean[i])); ctx.lineTo(XB(i + 1), Y(p.mean[i])); }
   ctx.stroke();
+  ctx.strokeStyle = C.ink; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(X(0), histTop); ctx.lineTo(X(0), histBottom); ctx.stroke(); ctx.setLineDash([]);
   ctx.strokeStyle = C.rule; ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(L, histBottom + 0.5); ctx.lineTo(R, histBottom + 0.5); ctx.stroke();
-  ctx.fillStyle = C.muted; font(13); ctx.textAlign = "right";
+  ctx.fillStyle = C.muted; font(12); ctx.textAlign = "right";
   for (const v of niceTicks(max)) { ctx.fillText(String(v), L - 8, Y(v) + 4); ctx.fillRect(L - 4, Y(v), 4, 1); }
-  ctx.save(); ctx.translate(b.x + 14, (histTop + histBottom) / 2); ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = "center"; font(14); ctx.fillText(`Looks per ${BIN / 1000} s`, 0, 0); ctx.restore();
-  ctx.textAlign = "center"; font(13);
-  for (let s = -BEFORE; s <= AFTER; s += 10_000) ctx.fillText(`${s / 1000}`, X(s), histBottom + 20);
-  font(14); ctx.fillText("Time relative to the saved response (s)", (L + R) / 2, histBottom + 40);
-  // Legend.
-  font(13); ctx.textAlign = "left";
-  const lx = L + 8, ly = histTop + 4;
-  ctx.fillStyle = C.bar; ctx.fillRect(lx, ly, 14, 10); ctx.fillStyle = C.ink; ctx.fillText("observed", lx + 20, ly + 10);
-  ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(lx + 100, ly + 5); ctx.lineTo(lx + 114, ly + 5); ctx.stroke();
-  ctx.fillStyle = C.band; ctx.fillRect(lx + 100, ly - 2, 14, 14);
-  ctx.fillStyle = C.ink; ctx.fillText(`chance (mean, 95% range of ${SHUFFLES} random placements)`, lx + 120, ly + 10);
+  ctx.save(); ctx.translate(g.axisX, (histTop + histBottom) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center"; font(13); ctx.fillText(`Looks per ${BIN / 1000} s`, 0, 0); ctx.restore();
+  ctx.textAlign = "center"; font(12);
+  const step = wideLegend ? 10_000 : 20_000;
+  for (let s = -BEFORE; s <= AFTER; s += step) ctx.fillText(`${s / 1000}`, X(s), histBottom + 16);
+  font(13); ctx.fillText("Time relative to the save (s)", (L + R) / 2, histBottom + 33);
+  font(12); ctx.textAlign = "left";
+  const lx = L + 6, ly = histTop + 2;
+  ctx.fillStyle = C.bar; ctx.fillRect(lx, ly, 12, 9); ctx.fillStyle = C.ink; ctx.fillText("observed", lx + 16, ly + 9);
+  ctx.fillStyle = C.band; ctx.fillRect(lx + 80, ly - 2, 12, 13);
+  ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(lx + 80, ly + 4); ctx.lineTo(lx + 92, ly + 4); ctx.stroke();
+  ctx.fillStyle = C.ink; ctx.fillText(wideLegend ? `chance (mean, 95% range of ${SHUFFLES} random placements)` : "chance (mean, 95% range)", lx + 98, ly + 9);
 }
 
 function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: FontFn) {
@@ -202,29 +214,37 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
  */
 function drawStaircase(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: FontFn) {
   const st = d.staircase!;
-  const L = b.x + 90, R = b.x + b.w - 10, top = b.y + 30, bottom = b.y + b.h - 50;
+  const L = b.x + 90, R = b.x + b.w - 10, top = b.y + 30;
+  const bottom = d.positions ? b.y + b.h * 0.62 : b.y + b.h - 50;
   const X = (t: number) => L + ((t - st.t0) / Math.max(1, st.t1 - st.t0)) * (R - L);
   ctx.fillStyle = C.ink; font(18, 650); ctx.textAlign = "left";
   ctx.fillText(`A   Looks to ${d.target}, item by item`, b.x, b.y + 12);
   const n = Math.max(1, st.rows.length), rowH = (bottom - top) / n;
   ctx.fillStyle = C.field; ctx.fillRect(L, top, R - L, bottom - top);
-  // Minute grid.
   ctx.strokeStyle = C.rule; ctx.lineWidth = 1; ctx.fillStyle = C.muted; font(13); ctx.textAlign = "center";
   const mins = (st.t1 - st.t0) / 60000;
   const step = mins > 60 ? 10 : mins > 20 ? 5 : mins > 8 ? 2 : 1;
   for (let m = 0; m <= mins; m += step) {
     const x = X(st.t0 + m * 60000);
     ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
-    ctx.fillText(String(m), x, bottom + 18);
+    ctx.fillText(String(m), x, bottom + 16);
   }
-  font(14); ctx.fillText("Minutes from the start of the timeline", (L + R) / 2, bottom + 38);
+  font(13); ctx.fillText("Minutes from the start of the timeline", (L + R) / 2, bottom + 33);
+  const cov = d.coverage ?? [];
   const labelEvery = Math.max(1, Math.ceil(12 / rowH));
   st.rows.forEach((r, i) => {
     const y0 = top + i * rowH, h = Math.max(2, rowH * 0.7), yb = y0 + rowH * 0.15;
-    ctx.fillStyle = "rgba(29,95,168,0.12)";
+    // Time on the item: analysed parts blue, not analysed grey.
+    ctx.fillStyle = "rgba(93,106,117,0.18)";
     ctx.fillRect(X(r.from), yb, Math.max(1, X(r.to) - X(r.from)), h);
+    ctx.fillStyle = "rgba(29,95,168,0.32)";
+    for (const c of cov) {
+      const a = Math.max(c.start, r.from), e = Math.min(c.end, r.to);
+      if (e > a) ctx.fillRect(X(a), yb, Math.max(1, X(e) - X(a)), h);
+    }
     ctx.fillStyle = "rgba(224,123,0,0.28)";
-    ctx.fillRect(X(Math.max(r.from, r.to - d.peri.windowMs)), yb, X(r.to) - X(Math.max(r.from, r.to - d.peri.windowMs)), h);
+    const ws = Math.max(r.from, r.to - d.peri.windowMs);
+    ctx.fillRect(X(ws), yb, X(r.to) - X(ws), h);
     ctx.fillStyle = C.tick;
     for (const [t, dur] of r.looks) ctx.fillRect(X(t) - 1, yb, Math.max(3, X(t + dur) - X(t) + 1), h);
     ctx.fillStyle = C.chance; ctx.fillRect(X(r.to) - 1, y0, 2.5, rowH);
@@ -234,13 +254,44 @@ function drawStaircase(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, fon
       ctx.fillText(r.label + (r.changed ? " *" : ""), L - 8, y0 + rowH / 2 + 4);
     }
   });
-  // Legend.
+  // Legend, spaced by measured text.
   font(13); ctx.textAlign = "left";
-  const ly = bottom + 56;
-  ctx.fillStyle = "rgba(29,95,168,0.12)"; ctx.fillRect(L, ly - 10, 14, 10); ctx.fillStyle = C.ink; ctx.fillText("time on the item", L + 20, ly);
-  ctx.fillStyle = "rgba(224,123,0,0.28)"; ctx.fillRect(L + 150, ly - 10, 14, 10); ctx.fillStyle = C.ink; ctx.fillText(`${d.peri.windowMs / 1000} s before the save`, L + 170, ly);
-  ctx.fillStyle = C.tick; ctx.fillRect(L + 330, ly - 10, 14, 10); ctx.fillStyle = C.ink; ctx.fillText(`look to ${d.target}`, L + 350, ly);
-  ctx.fillStyle = C.chance; ctx.fillRect(L + 560, ly - 12, 2.5, 14); ctx.fillStyle = C.ink; ctx.fillText("saved", L + 570, ly);
+  let lx = L; const ly = bottom + 54;
+  const key = (draw: (x: number) => void, text: string) => { draw(lx); ctx.fillStyle = C.ink; ctx.fillText(text, lx + 20, ly); lx += 20 + ctx.measureText(text).width + 22; };
+  key((x) => { ctx.fillStyle = "rgba(29,95,168,0.32)"; ctx.fillRect(x, ly - 10, 14, 10); }, "time on the item");
+  if (cov.length) key((x) => { ctx.fillStyle = "rgba(93,106,117,0.18)"; ctx.fillRect(x, ly - 10, 14, 10); }, "not analysed");
+  key((x) => { ctx.fillStyle = "rgba(224,123,0,0.28)"; ctx.fillRect(x, ly - 10, 14, 10); }, `last ${d.peri.windowMs / 1000} s`);
+  key((x) => { ctx.fillStyle = C.tick; ctx.fillRect(x, ly - 10, 14, 10); }, "look");
+  key((x) => { ctx.fillStyle = C.chance; ctx.fillRect(x + 6, ly - 12, 2.5, 14); }, "saved");
+
+  // Below the staircase: where in each item the looks started (left), and looks around saves (right).
+  const pr = d.positions;
+  if (!pr) return;
+  const hTop = bottom + 104, hBottom = b.y + b.h - 34;
+  const mid = (L + R) / 2;
+  const pL = L, pR = mid - 30;
+  const max = Math.max(1, ...pr.bins, pr.expectedPerBin);
+  const Y = (v: number) => hBottom - (v / max) * (hBottom - hTop);
+  const XB = (i: number) => pL + (i / 10) * (pR - pL);
+  ctx.fillStyle = C.ink; font(14, 650); ctx.textAlign = "left";
+  ctx.fillText(`Where in its item each look started (${pr.items} items)`, b.x, hTop - 14);
+  ctx.fillText("Looks around saves (all items, aligned)", mid + 30, hTop - 14);
+  ctx.fillStyle = C.bar;
+  pr.bins.forEach((v, i) => ctx.fillRect(XB(i) + 2, Y(v), XB(i + 1) - XB(i) - 4, hBottom - Y(v)));
+  ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(pL, Y(pr.expectedPerBin)); ctx.lineTo(pR, Y(pr.expectedPerBin)); ctx.stroke();
+  ctx.strokeStyle = C.rule; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(pL, hBottom + 0.5); ctx.lineTo(pR, hBottom + 0.5); ctx.stroke();
+  ctx.fillStyle = C.muted; font(12); ctx.textAlign = "right";
+  for (const v of niceTicks(max)) ctx.fillText(String(v), pL - 8, Y(v) + 4);
+  ctx.save(); ctx.translate(b.x + 30, (hTop + hBottom) / 2); ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center"; font(13); ctx.fillText("Looks", 0, 0); ctx.restore();
+  ctx.textAlign = "center"; font(12);
+  ctx.fillText("start", pL + 14, hBottom + 16); ctx.fillText("halfway", (pL + pR) / 2, hBottom + 16); ctx.fillText("saved", pR - 16, hBottom + 16);
+  font(13); ctx.fillText("Position in the item", (pL + pR) / 2, hBottom + 33);
+  ctx.textAlign = "left"; ctx.fillStyle = C.ink; font(12);
+  ctx.fillStyle = C.bar; ctx.fillRect(pL + 6, hTop + 2, 12, 9); ctx.fillStyle = C.ink; ctx.fillText("observed", pL + 22, hTop + 11);
+  ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(pL + 86, hTop + 6); ctx.lineTo(pL + 98, hTop + 6); ctx.stroke();
+  ctx.fillStyle = C.ink; ctx.fillText("if spread evenly", pL + 104, hTop + 11);
+  drawPeriHist(ctx, d.peri, { L: mid + 70, R, top: hTop, bottom: hBottom, axisX: mid + 40 }, font, false);
 }
 
 function niceTicks(max: number): number[] {

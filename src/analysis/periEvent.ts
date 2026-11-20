@@ -144,3 +144,88 @@ export function groupEvents(times: number[], gapMs = 2000): { t: number; members
   });
   return groups;
 }
+
+export interface PositionResult {
+  /** Items (save moments) whose whole time was analysed and that had at least one look. */
+  items: number;
+  /** Of those, items whose looks fall mostly in the second half (median position > 0.5). */
+  lateItems: number;
+  /** One-sided sign test: chance of at least lateItems of items if positions were uniform. */
+  p: number;
+  /** Median over items of each item's median look position (0 = start of the item, 1 = the save). */
+  medianPosition: number;
+  /** Look onsets in ten bins of position across all counted items, and the count expected per bin if uniform. */
+  bins: number[];
+  expectedPerBin: number;
+  /** Items analysed in full, with or without looks. */
+  analysedItems: number;
+  /** Mean over items of each item's median look position, and its p value against looks timed independently of answering. */
+  meanPosition: number;
+  pMean: number;
+  /** Simulations used for pMean, and how many reached the observed mean. */
+  sims: number;
+  simsAtLeast: number;
+}
+
+/**
+ * Where in each item the looks fall, without any window to choose. An item runs from the previous
+ * save to its own save; a look's position is how far through the item it starts (0 to 1). If looks
+ * had nothing to do with answering, positions would be spread evenly; if they come just before
+ * answering, they bunch near 1. Each item with looks gives one value (the median position of its
+ * looks), so bursts within an item count once, and a sign test asks how many items have that value
+ * above 0.5. Only items analysed from start to end are used.
+ */
+export function itemPositions(items: { from: number; to: number }[], looks: number[], coverage: Interval[], frameMs: number): PositionResult {
+  const analysed = (a: number, b: number) => coverage.some((c) => a >= c.start - frameMs && b <= c.end + frameMs);
+  const sorted = looks.slice().sort((a, b) => a - b);
+  const bins = new Array(10).fill(0);
+  const perItem: number[] = [];
+  let analysedItems = 0, total = 0;
+  for (const it of items) {
+    if (!(it.to > it.from) || !analysed(it.from, it.to)) continue;
+    analysedItems++;
+    const us = sorted.filter((l) => l > it.from && l <= it.to).map((l) => (l - it.from) / (it.to - it.from));
+    if (!us.length) continue;
+    for (const u of us) bins[Math.min(9, Math.floor(u * 10))]++;
+    total += us.length;
+    perItem.push(median(us));
+  }
+  const n = perItem.length, k = perItem.filter((u) => u > 0.5).length;
+  // Mean position test. Under the null each item's value is one uniform position: as if all of an
+  // item's looks were a single burst. That is the widest spread the null can have, so the test is
+  // conservative about bursts (a median of several independent positions would cluster nearer 0.5).
+  const mean = n ? perItem.reduce((a, b) => a + b, 0) / n : NaN;
+  const SIMS = 100_000;
+  let seed = 54321, atLeast = 0;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+  if (n) for (let i = 0; i < SIMS; i++) {
+    let sum = 0;
+    for (let j = 0; j < n; j++) sum += rnd();
+    if (sum / n >= mean) atLeast++;
+  }
+  return {
+    items: n, lateItems: k, p: n ? binomialUpper(k, n) : NaN,
+    medianPosition: median(perItem), bins, expectedPerBin: total / 10, analysedItems,
+    meanPosition: mean, pMean: n ? (atLeast + 1) / (SIMS + 1) : NaN, sims: SIMS, simsAtLeast: atLeast,
+  };
+}
+
+/** P(X ≥ k) for X ~ Binomial(n, 0.5). */
+function binomialUpper(k: number, n: number): number {
+  let p = 0, c = 1; // c = C(n, i)
+  for (let i = 0; i <= n; i++) {
+    if (i > 0) c = (c * (n - i + 1)) / i;
+    if (i >= k) p += c;
+  }
+  return p / 2 ** n;
+}
+
+export function positionSentence(target: string, r: PositionResult): string {
+  if (!r.items) return "";
+  const fmtP = (p: number) => (p < 0.0001 ? p.toExponential(1).replace("e-", " × 10^-") : p.toFixed(4));
+  const pm = r.simsAtLeast === 0 ? `none of ${r.sims.toLocaleString("en-NZ")} simulations reached it, p < ${(1 / (r.sims + 1)).toFixed(5)}` : `p = ${fmtP(r.pMean)}`;
+  const ps = r.p < 0.0001 ? `p = ${fmtP(r.p)}` : `p = ${r.p.toFixed(4)}`;
+  return `On average, looks to ${target} came ${Math.round(r.meanPosition * 100)}% of the way through their item, across ${r.items} items with looks (of ${r.analysedItems} analysed in full); ` +
+    `if their timing had nothing to do with answering, the average would be 50% (${pm}). ` +
+    `In ${r.lateItems} of the ${r.items} items most looks came in the second half (sign test, ${ps}).`;
+}

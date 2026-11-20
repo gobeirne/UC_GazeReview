@@ -1,4 +1,4 @@
-import { AFTER, BEFORE, BIN, groupEvents, median, periEvent, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
+import { AFTER, BEFORE, BIN, groupEvents, itemPositions, median, periEvent, positionSentence, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
 import type { GazeEvent } from "../analysis/events";
 import type { GazeSeries } from "../analysis/gazeModel";
 import { contains, type Interval } from "../analysis/intervals";
@@ -226,7 +226,8 @@ export class TimelinePanel {
       return { event: e, videoMs: t, change, lastLook, analysed };
     });
     const usedGroups = peri.used.map((i) => groups[i].members.map((m) => evs[m]));
-    const caption = figureCaption(target, peri, panelA);
+    const positions = itemPositions(staircase.rows, sel.map((g) => g.start), coverage, rec.frameIntervalMs);
+    const caption = figureCaption(target, peri, panelA, positions);
     const fig = drawFigure({
       title: `Looks to ${target} around saved responses`,
       subtitle: `${rec.name} · ${peri.events} responses with the minute before analysed · ${(totalLength(coverage) / 60000).toFixed(1)} min of video analysed`,
@@ -235,6 +236,7 @@ export class TimelinePanel {
       rowChanged: usedGroups.map((g) => g.some((e) => e.change_type === "revision")),
       gaze, view: this.host.planeView(), regions, caption, panelA, staircase,
       heatSpan: rec.settings.countOnce !== false && span ? span : undefined,
+      positions: panelA === "staircase" ? positions : undefined, coverage,
       regionStats: [
         ...regions.map((r, i) => ({ name: r.name, colour: r.colour, looks: r.isScreen ? null : glances.filter((g) => g.region === i).length, share: (d.get(r.isScreen ? SCREEN : i) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) })),
         { name: "Elsewhere", colour: "#e07b00", looks: glances.filter((g) => g.region === ELSEWHERE).length, share: (d.get(ELSEWHERE) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) },
@@ -246,7 +248,7 @@ export class TimelinePanel {
       unlabelledLooks: glances.filter((g) => g.region === ELSEWHERE).length,
       target, peri, rows,
       includeText: this.box.querySelector<HTMLInputElement>("#tl-include-text")?.checked ?? false,
-      figurePng: fig.toDataURL("image/png"), caption,
+      figurePng: fig.toDataURL("image/png"), caption, positions,
       // Kept for the PNG export.
       ...({ _canvas: fig } as object),
     } as ReportData;
@@ -452,8 +454,14 @@ export class TimelinePanel {
       if (note) note.innerHTML = `<span class="warn-line">No region is marked as the screen, so looks can’t be counted. Tick “Screen” for the screen region in the Regions panel.</span>`;
       return;
     }
-    void dt;
-    this.drawHist(this.computePeri(evs.map((e) => this.videoTime(e)), chosen, coverage).peri);
+    const cp = this.computePeri(evs.map((e) => this.videoTime(e)), chosen, coverage);
+    this.drawHist(cp.peri);
+    const times = evs.map((e) => this.videoTime(e));
+    const items = cp.groups.map((g, i) => ({ from: cp.prevs ? cp.prevs[i] : (i ? times[cp.groups[i - 1].members[cp.groups[i - 1].members.length - 1]] : (cp.span?.start ?? g.t - BEFORE)), to: g.t }));
+    const pos = itemPositions(items, chosen.map((g) => g.start), coverage, dt);
+    const note = this.box.querySelector("#tl-hist-note");
+    const where = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
+    if (note && pos.items) note.innerHTML = `<strong>${esc(positionSentence(where, pos))}</strong><br>` + note.innerHTML;
   }
 
   private drawHist(h: PeriResult | null) {

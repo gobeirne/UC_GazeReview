@@ -133,3 +133,52 @@ describe("count each look once", () => {
     expect(inSpan.p).toBeLessThan(0.01);
   });
 });
+
+describe("where in each item looks fall", () => {
+  test("looks just before each save are late in their items", async () => {
+    const { itemPositions } = await import("../src/analysis/periEvent");
+    const saves = Array.from({ length: 30 }, (_, i) => 60_000 + i * 90_000);
+    const items = saves.map((t, i) => ({ from: i ? saves[i - 1] : 0, to: t }));
+    const looks = saves.flatMap((t) => [t - 12_000, t - 9_000]);
+    const r = itemPositions(items, looks, [{ start: 0, end: 3_000_000 }], 33);
+    expect(r.items).toBe(30);
+    expect(r.lateItems).toBe(30);
+    expect(r.p).toBeLessThan(1e-6);
+    expect(r.bins[8] + r.bins[9]).toBe(60);
+  });
+  test("evenly spread looks give an unremarkable result", async () => {
+    const { itemPositions } = await import("../src/analysis/periEvent");
+    const saves = Array.from({ length: 30 }, (_, i) => 60_000 + i * 90_000);
+    const items = saves.map((t, i) => ({ from: i ? saves[i - 1] : 0, to: t }));
+    const looks = saves.map((t, i) => t - (i % 2 ? 20_000 : 70_000));
+    const r = itemPositions(items, looks, [{ start: 0, end: 3_000_000 }], 33);
+    expect(r.p).toBeGreaterThan(0.2);
+  });
+  test("items not analysed in full are left out", async () => {
+    const { itemPositions } = await import("../src/analysis/periEvent");
+    const r = itemPositions([{ from: 0, to: 100_000 }, { from: 100_000, to: 200_000 }], [95_000, 195_000], [{ start: 50_000, end: 300_000 }], 33);
+    expect(r.analysedItems).toBe(1);
+  });
+});
+
+describe("mean position test", () => {
+  test("is far stronger than the window test for late looks of varying lead", async () => {
+    const { itemPositions } = await import("../src/analysis/periEvent");
+    // 30 items of 90 s; looks 5–40 s before each save (late in the item, often outside a 10 s window).
+    const saves = Array.from({ length: 30 }, (_, i) => 60_000 + i * 90_000);
+    const items = saves.map((t, i) => ({ from: i ? saves[i - 1] : 0, to: t }));
+    const looks = saves.map((t, i) => t - (5_000 + (i * 7_919) % 35_000));
+    const r = itemPositions(items, looks, [{ start: 0, end: 3_000_000 }], 33);
+    expect(r.meanPosition).toBeGreaterThan(0.7);
+    expect(r.simsAtLeast).toBe(0);
+    expect(r.pMean).toBeLessThan(1e-4);
+  });
+  test("looks spread through items give a mean near 0.5 and no effect", async () => {
+    const { itemPositions } = await import("../src/analysis/periEvent");
+    const saves = Array.from({ length: 30 }, (_, i) => 60_000 + i * 90_000);
+    const items = saves.map((t, i) => ({ from: i ? saves[i - 1] : 0, to: t }));
+    const looks = saves.map((t, i) => t - 90_000 * ((i * 0.618) % 1) + 1);
+    const r = itemPositions(items, looks, [{ start: 0, end: 3_000_000 }], 33);
+    expect(r.pMean).toBeGreaterThan(0.05);
+  });
+});
