@@ -19,7 +19,11 @@ export interface FigureData {
   caption: string;
   /** Panel A as the aligned raster and histogram, or item by item against time ("staircase"). */
   panelA?: "aligned" | "staircase";
-  staircase?: { t0: number; t1: number; rows: { label: string; changed: boolean; from: number; to: number; looks: [number, number][] }[] };
+  staircase?: { t0: number; t1: number; rows: { label: string; changed: boolean; from: number; to: number; looks: [number, number][]; otherLooks?: [number, number][] }[] };
+  /** Positions of looks elsewhere off the screen, shown beside the target's. */
+  otherPositions?: PositionResult;
+  /** Panel B heatmap only from these windows (e.g. the time before each save). */
+  heatWindows?: { start: number; end: number }[];
   /** Only frames in this video span go into panel B's heatmap. */
   heatSpan?: { start: number; end: number };
   /** Where in each item looks fall (staircase panel). */
@@ -32,7 +36,7 @@ export interface FigureData {
 const C = {
   ink: "#17212b", muted: "#5d6a75", rule: "#d8dee3", field: "#f6f8f9",
   bar: "#1d5fa8", band: "rgba(0,153,184,0.16)", chance: "#0099b8", tick: "#17212b",
-  window: "rgba(224,123,0,0.10)", changed: "#bb6624", heat: [29, 95, 168] as const,
+  window: "rgba(224,123,0,0.10)", changed: "#bb6624", heat: [29, 95, 168] as const, other: "#e07b00",
 };
 const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
 
@@ -139,7 +143,7 @@ function drawPeriHist(ctx: CanvasRenderingContext2D, p: PeriResult, g: { L: numb
 
 function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: FontFn) {
   ctx.fillStyle = C.ink; font(18, 650); ctx.textAlign = "left";
-  ctx.fillText(d.heatSpan ? "B   Where gaze went (during the timeline)" : "B   Where gaze went (whole analysed video)", b.x, b.y + 12);
+  ctx.fillText(d.heatWindows ? `B   Where gaze went in the ${d.peri.windowMs / 1000} s before each save` : d.heatSpan ? "B   Where gaze went (during the timeline)" : "B   Where gaze went (whole analysed video)", b.x, b.y + 12);
   const V = d.view, g = d.gaze;
   const top = b.y + 50, availH = b.h - 110;
   const s = Math.min(b.w / (V.h1 - V.h0), availH / (V.v1 - V.v0));
@@ -152,7 +156,8 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
   let max = 1;
   for (let i = 0; i < g.n; i++) {
     if (!g.ok[i]) continue;
-    if (d.heatSpan && (g.t[i] < d.heatSpan.start || g.t[i] > d.heatSpan.end)) continue;
+    if (d.heatWindows) { if (!d.heatWindows.some((w) => g.t[i] >= w.start && g.t[i] < w.end)) continue; }
+    else if (d.heatSpan && (g.t[i] < d.heatSpan.start || g.t[i] > d.heatSpan.end)) continue;
     const x = Math.floor(g.h[i] - V.h0), y = Math.floor(V.v1 - g.v[i]);
     if (x < 0 || y < 0 || x >= nx || y >= ny) continue;
     max = Math.max(max, ++cells[y * nx + x]);
@@ -245,6 +250,10 @@ function drawStaircase(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, fon
     ctx.fillStyle = "rgba(224,123,0,0.28)";
     const ws = Math.max(r.from, r.to - d.peri.windowMs);
     ctx.fillRect(X(ws), yb, X(r.to) - X(ws), h);
+    if (r.otherLooks) {
+      ctx.fillStyle = C.other;
+      for (const [t, dur] of r.otherLooks) ctx.fillRect(X(t) - 1, yb + h * 0.55, Math.max(2, X(t + dur) - X(t) + 1), h * 0.45);
+    }
     ctx.fillStyle = C.tick;
     for (const [t, dur] of r.looks) ctx.fillRect(X(t) - 1, yb, Math.max(3, X(t + dur) - X(t) + 1), h);
     ctx.fillStyle = C.chance; ctx.fillRect(X(r.to) - 1, y0, 2.5, rowH);
@@ -261,7 +270,8 @@ function drawStaircase(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, fon
   key((x) => { ctx.fillStyle = "rgba(29,95,168,0.32)"; ctx.fillRect(x, ly - 10, 14, 10); }, "time on the item");
   if (cov.length) key((x) => { ctx.fillStyle = "rgba(93,106,117,0.18)"; ctx.fillRect(x, ly - 10, 14, 10); }, "not analysed");
   key((x) => { ctx.fillStyle = "rgba(224,123,0,0.28)"; ctx.fillRect(x, ly - 10, 14, 10); }, `last ${d.peri.windowMs / 1000} s`);
-  key((x) => { ctx.fillStyle = C.tick; ctx.fillRect(x, ly - 10, 14, 10); }, "look");
+  key((x) => { ctx.fillStyle = C.tick; ctx.fillRect(x, ly - 10, 14, 10); }, `look to ${d.target.split(" (")[0]}`);
+  if (d.otherPositions) key((x) => { ctx.fillStyle = C.other; ctx.fillRect(x, ly - 5, 14, 5); }, "look elsewhere");
   key((x) => { ctx.fillStyle = C.chance; ctx.fillRect(x + 6, ly - 12, 2.5, 14); }, "saved");
 
   // Below the staircase: where in each item the looks started (left), and looks around saves (right).
@@ -270,27 +280,39 @@ function drawStaircase(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, fon
   const hTop = bottom + 104, hBottom = b.y + b.h - 34;
   const mid = (L + R) / 2;
   const pL = L, pR = mid - 30;
-  const max = Math.max(1, ...pr.bins, pr.expectedPerBin);
+  const op = d.otherPositions;
+  // Two kinds of look on one scale: share of each kind's looks per bin (so different totals compare).
+  const share = (bins: number[]) => { const t = bins.reduce((a, b) => a + b, 0) || 1; return bins.map((v) => (100 * v) / t); };
+  const mainS = share(pr.bins), otherS = op ? share(op.bins) : null;
+  const max = Math.max(10, ...mainS, ...(otherS ?? []), 10);
   const Y = (v: number) => hBottom - (v / max) * (hBottom - hTop);
   const XB = (i: number) => pL + (i / 10) * (pR - pL);
   ctx.fillStyle = C.ink; font(14, 650); ctx.textAlign = "left";
-  ctx.fillText(`Where in its item each look started (${pr.items} items)`, b.x, hTop - 14);
+  ctx.fillText(`Where in its item each look started (% of looks)`, b.x, hTop - 14);
   ctx.fillText("Looks around saves (all items, aligned)", mid + 30, hTop - 14);
+  const bw = (XB(1) - XB(0) - 4) / (otherS ? 2 : 1);
   ctx.fillStyle = C.bar;
-  pr.bins.forEach((v, i) => ctx.fillRect(XB(i) + 2, Y(v), XB(i + 1) - XB(i) - 4, hBottom - Y(v)));
-  ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(pL, Y(pr.expectedPerBin)); ctx.lineTo(pR, Y(pr.expectedPerBin)); ctx.stroke();
+  mainS.forEach((v, i) => ctx.fillRect(XB(i) + 2, Y(v), bw, hBottom - Y(v)));
+  if (otherS) { ctx.fillStyle = C.other; otherS.forEach((v, i) => ctx.fillRect(XB(i) + 2 + bw, Y(v), bw, hBottom - Y(v))); }
+  ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(pL, Y(10)); ctx.lineTo(pR, Y(10)); ctx.stroke();
   ctx.strokeStyle = C.rule; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(pL, hBottom + 0.5); ctx.lineTo(pR, hBottom + 0.5); ctx.stroke();
   ctx.fillStyle = C.muted; font(12); ctx.textAlign = "right";
   for (const v of niceTicks(max)) ctx.fillText(String(v), pL - 8, Y(v) + 4);
   ctx.save(); ctx.translate(b.x + 30, (hTop + hBottom) / 2); ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = "center"; font(13); ctx.fillText("Looks", 0, 0); ctx.restore();
+  ctx.textAlign = "center"; font(13); ctx.fillText("% of looks", 0, 0); ctx.restore();
   ctx.textAlign = "center"; font(12);
   ctx.fillText("start", pL + 14, hBottom + 16); ctx.fillText("halfway", (pL + pR) / 2, hBottom + 16); ctx.fillText("saved", pR - 16, hBottom + 16);
   font(13); ctx.fillText("Position in the item", (pL + pR) / 2, hBottom + 33);
   ctx.textAlign = "left"; ctx.fillStyle = C.ink; font(12);
-  ctx.fillStyle = C.bar; ctx.fillRect(pL + 6, hTop + 2, 12, 9); ctx.fillStyle = C.ink; ctx.fillText("observed", pL + 22, hTop + 11);
-  ctx.strokeStyle = C.chance; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(pL + 86, hTop + 6); ctx.lineTo(pL + 98, hTop + 6); ctx.stroke();
-  ctx.fillStyle = C.ink; ctx.fillText("if spread evenly", pL + 104, hTop + 11);
+  let kx = pL + 6;
+  const k2 = (colour: string, text: string, line = false) => {
+    if (line) { ctx.strokeStyle = colour; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(kx, hTop + 6); ctx.lineTo(kx + 12, hTop + 6); ctx.stroke(); }
+    else { ctx.fillStyle = colour; ctx.fillRect(kx, hTop + 2, 12, 9); }
+    ctx.fillStyle = C.ink; ctx.fillText(text, kx + 16, hTop + 11); kx += 16 + ctx.measureText(text).width + 14;
+  };
+  k2(C.bar, d.target.split(" (")[0]);
+  if (otherS) k2(C.other, "elsewhere");
+  k2(C.chance, "even spread", true);
   drawPeriHist(ctx, d.peri, { L: mid + 70, R, top: hTop, bottom: hBottom, axisX: mid + 40 }, font, false);
 }
 

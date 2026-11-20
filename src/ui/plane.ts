@@ -20,7 +20,7 @@ export interface PlaneState {
   insetAspect: number;
   showHeat: boolean;
   /** Frames counted in the heatmap. */
-  heatScope: Interval | null;
+  heatScope: Interval | Interval[] | null;
   /** A note drawn at the top of the plane about what the heatmap shows. */
   heatHint: string;
   trailMs: number;
@@ -216,7 +216,9 @@ export class GazePlane {
     const g = st.gaze;
     // Heatmap of the scope.
     if (g && st.showHeat) {
-      const key = `${g.t.length}:${g.t[0]}:${g.h[0]}:${st.heatScope?.start}:${st.heatScope?.end}:${V.h0}:${V.h1}:${V.v0}:${V.v1}`;
+      const sc = st.heatScope;
+      const scKey = !sc ? "" : Array.isArray(sc) ? `${sc.length}:${sc[0]?.start}:${sc[sc.length - 1]?.end}` : `${sc.start}:${sc.end}`;
+      const key = `${g.t.length}:${g.t[0]}:${g.h[0]}:${scKey}:${V.h0}:${V.h1}:${V.v0}:${V.v1}`;
       if (!this.heat || this.heat.key !== key) this.heat = buildHeat(g, st.heatScope, V, key);
       const H = this.heat;
       const nx = V.h1 - V.h0, ny = V.v1 - V.v0;
@@ -322,13 +324,14 @@ export class GazePlane {
   }
 }
 
-function buildHeat(g: GazeSeries, scope: Interval | null, V: { h0: number; h1: number; v0: number; v1: number }, key: string) {
+function buildHeat(g: GazeSeries, scope: Interval | Interval[] | null, V: { h0: number; h1: number; v0: number; v1: number }, key: string) {
+  const list = !scope ? null : Array.isArray(scope) ? scope : [scope];
   const nx = V.h1 - V.h0, ny = V.v1 - V.v0;
   const cells = new Float32Array(nx * ny);
   let max = 1;
   for (let i = 0; i < g.n; i++) {
     if (!g.ok[i]) continue;
-    if (scope && (g.t[i] < scope.start || g.t[i] >= scope.end)) continue;
+    if (list && !list.some((s) => g.t[i] >= s.start && g.t[i] < s.end)) continue;
     const x = Math.floor(g.h[i] - V.h0), y = Math.floor(V.v1 - g.v[i]);
     if (x < 0 || y < 0 || x >= nx || y >= ny) continue;
     const c = ++cells[y * nx + x];

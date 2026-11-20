@@ -182,3 +182,15 @@ describe("mean position test", () => {
     expect(r.pMean).toBeGreaterThan(0.05);
   });
 });
+
+describe("phone versus elsewhere", () => {
+  test("detects that one kind of look comes later in items than another", async () => {
+    const { comparePositions } = await import("../src/analysis/periEvent");
+    const late = Array.from({ length: 25 }, (_, i) => 0.8 + (i % 5) * 0.04);
+    const spread = Array.from({ length: 25 }, (_, i) => ((i * 0.618) % 1));
+    const c = comparePositions(late, spread);
+    expect(c.meanA).toBeGreaterThan(c.meanB);
+    expect(c.p).toBeLessThan(0.001);
+    expect(comparePositions(spread, spread.slice().reverse()).p).toBeGreaterThan(0.1);
+  });
+});

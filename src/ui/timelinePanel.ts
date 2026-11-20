@@ -1,4 +1,4 @@
-import { AFTER, BEFORE, BIN, groupEvents, itemPositions, median, periEvent, positionSentence, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
+import { AFTER, BEFORE, BIN, comparePositions, compareSentence, groupEvents, itemPositions, median, periEvent, positionSentence, pText, SHUFFLES, type PeriResult } from "../analysis/periEvent";
 import type { GazeEvent } from "../analysis/events";
 import type { GazeSeries } from "../analysis/gazeModel";
 import { contains, type Interval } from "../analysis/intervals";
@@ -189,6 +189,7 @@ export class TimelinePanel {
     const { peri, groups, prevs, span } = this.computePeri(times, sel, coverage);
     const panelA = (this.box.querySelector<HTMLSelectElement>("#tl-panela")?.value ?? "staircase") as "aligned" | "staircase";
     const sortedSel = sel.slice().sort((a, b) => a.start - b.start);
+    const others = this.otherLooks(glances).sort((a, b) => a.start - b.start);
     const staircase = {
       t0: span?.start ?? times[0], t1: span?.end ?? times[times.length - 1],
       rows: groups.map((g, i) => {
@@ -198,6 +199,7 @@ export class TimelinePanel {
           label: groupLabel(items), changed: items.some((e) => e.change_type === "revision"),
           from, to: g.t,
           looks: sortedSel.filter((l) => l.start > from && l.start <= g.t).map((l) => [l.start, l.end - l.start] as [number, number]),
+          otherLooks: others.filter((l) => l.start > from && l.start <= g.t).map((l) => [l.start, l.end - l.start] as [number, number]),
         };
       }),
     };
@@ -227,7 +229,12 @@ export class TimelinePanel {
     });
     const usedGroups = peri.used.map((i) => groups[i].members.map((m) => evs[m]));
     const positions = itemPositions(staircase.rows, sel.map((g) => g.start), coverage, rec.frameIntervalMs);
-    const caption = figureCaption(target, peri, panelA, positions);
+    const otherPositions = others.length ? itemPositions(staircase.rows, others.map((g) => g.start), coverage, rec.frameIntervalMs) : undefined;
+    const comparison = otherPositions ? comparePositions(positions.values, otherPositions.values) : undefined;
+    const otherLabel = `elsewhere off the screen`;
+    const compareText = comparison ? compareSentence(where, otherLabel, comparison) : "";
+    const panelB = (this.box.querySelector<HTMLSelectElement>("#tl-panelb")?.value ?? "timeline") as "timeline" | "before";
+    const caption = figureCaption(target, peri, panelA, positions) + (compareText ? " " + compareText : "");
     const fig = drawFigure({
       title: `Looks to ${target} around saved responses`,
       subtitle: `${rec.name} · ${peri.events} responses with the minute before analysed · ${(totalLength(coverage) / 60000).toFixed(1)} min of video analysed`,
@@ -236,7 +243,9 @@ export class TimelinePanel {
       rowChanged: usedGroups.map((g) => g.some((e) => e.change_type === "revision")),
       gaze, view: this.host.planeView(), regions, caption, panelA, staircase,
       heatSpan: rec.settings.countOnce !== false && span ? span : undefined,
+      heatWindows: panelB === "before" ? this.beforeWindows() : undefined,
       positions: panelA === "staircase" ? positions : undefined, coverage,
+      otherPositions: panelA === "staircase" ? otherPositions : undefined,
       regionStats: [
         ...regions.map((r, i) => ({ name: r.name, colour: r.colour, looks: r.isScreen ? null : glances.filter((g) => g.region === i).length, share: (d.get(r.isScreen ? SCREEN : i) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) })),
         { name: "Elsewhere", colour: "#e07b00", looks: glances.filter((g) => g.region === ELSEWHERE).length, share: (d.get(ELSEWHERE) ?? 0) / Math.max(1, ok * rec.frameIntervalMs) },
@@ -248,7 +257,7 @@ export class TimelinePanel {
       unlabelledLooks: glances.filter((g) => g.region === ELSEWHERE).length,
       target, peri, rows,
       includeText: this.box.querySelector<HTMLInputElement>("#tl-include-text")?.checked ?? false,
-      figurePng: fig.toDataURL("image/png"), caption, positions,
+      figurePng: fig.toDataURL("image/png"), caption, positions, compareText,
       // Kept for the PNG export.
       ...({ _canvas: fig } as object),
     } as ReportData;
@@ -261,6 +270,22 @@ export class TimelinePanel {
     if (kind === "export-figure") (d as unknown as { _canvas: HTMLCanvasElement })._canvas.toBlob((b) => b && downloadBlob(`${base}-looks-around-responses.png`, b), "image/png");
     if (kind === "export-report") download(`${base}-gaze-report.html`, buildReportHtml(d), "text/html");
     if (kind === "export-csv") download(`${base}-responses.csv`, buildCsv(d), "text/csv");
+  }
+
+  /** The window before each save moment (for the heatmap), once the timeline is lined up. */
+  beforeWindows(): Interval[] {
+    const rec = this.host.rec();
+    if (!rec?.timeline || !this.synced()) return [];
+    const w = rec.settings.beforeWindowMs ?? 10_000;
+    return groupEvents(rec.timeline.data.events.map((e) => this.videoTime(e))).map((g) => ({ start: g.t - w, end: g.t }));
+  }
+
+  /** Looks away to anywhere except the chosen region (and never the screen), with the same length filters. */
+  private otherLooks(glances: GazeEvent[]): GazeEvent[] {
+    const s = this.host.rec()?.settings;
+    if (this.region === "any" || !s) return [];
+    const minFrames = s.minRegionFrames ?? 0;
+    return this.looksFor(glances).filter((g) => String(g.region) !== this.region && g.end - g.start >= s.minLookMs && (!minFrames || g.frames >= minFrames));
   }
 
   /** The timeline's span in video time: from its start to its finish (or last event). */
@@ -388,6 +413,7 @@ export class TimelinePanel {
           <button data-act="export-figure">Export figure (PNG)</button>
           <button data-act="export-report">Export report (HTML)</button>
           <button data-act="export-csv">Export responses (CSV)</button>
+          <label class="small">Panel B <select id="tl-panelb"><option value="timeline">gaze during the timeline</option><option value="before">gaze in the window before each save</option></select></label>
           <label class="small">Panel A <select id="tl-panela"><option value="staircase">item by item against time</option><option value="aligned">aligned to each save, with histogram</option></select></label>
           <label class="check small"><input type="checkbox" id="tl-include-text"> Include item wording and responses</label>
         </div>
@@ -461,7 +487,10 @@ export class TimelinePanel {
     const pos = itemPositions(items, chosen.map((g) => g.start), coverage, dt);
     const note = this.box.querySelector("#tl-hist-note");
     const where = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
-    if (note && pos.items) note.innerHTML = `<strong>${esc(positionSentence(where, pos))}</strong><br>` + note.innerHTML;
+    const oth = this.otherLooks(glances);
+    const othPos = oth.length ? itemPositions(items, oth.map((g) => g.start), coverage, dt) : null;
+    const cmp = othPos && pos.items ? compareSentence(where, "elsewhere off the screen", comparePositions(pos.values, othPos.values)) : "";
+    if (note && pos.items) note.innerHTML = `<strong>${esc(positionSentence(where, pos))}</strong>${cmp ? `<br><strong>${esc(cmp)}</strong>` : ""}<br>` + note.innerHTML;
   }
 
   private drawHist(h: PeriResult | null) {

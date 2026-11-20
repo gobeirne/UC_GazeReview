@@ -165,6 +165,8 @@ export interface PositionResult {
   /** Simulations used for pMean, and how many reached the observed mean. */
   sims: number;
   simsAtLeast: number;
+  /** Each counted item's median look position. */
+  values: number[];
 }
 
 /**
@@ -206,7 +208,7 @@ export function itemPositions(items: { from: number; to: number }[], looks: numb
   return {
     items: n, lateItems: k, p: n ? binomialUpper(k, n) : NaN,
     medianPosition: median(perItem), bins, expectedPerBin: total / 10, analysedItems,
-    meanPosition: mean, pMean: n ? (atLeast + 1) / (SIMS + 1) : NaN, sims: SIMS, simsAtLeast: atLeast,
+    meanPosition: mean, pMean: n ? (atLeast + 1) / (SIMS + 1) : NaN, sims: SIMS, simsAtLeast: atLeast, values: perItem,
   };
 }
 
@@ -228,4 +230,31 @@ export function positionSentence(target: string, r: PositionResult): string {
   return `On average, looks to ${target} came ${Math.round(r.meanPosition * 100)}% of the way through their item, across ${r.items} items with looks (of ${r.analysedItems} analysed in full); ` +
     `if their timing had nothing to do with answering, the average would be 50% (${pm}). ` +
     `In ${r.lateItems} of the ${r.items} items most looks came in the second half (sign test, ${ps}).`;
+}
+
+/**
+ * Are looks to one place later in their items than looks elsewhere? Compares the mean of the
+ * per-item positions of two kinds of look by shuffling which kind each item's value belongs to
+ * (20,000 shuffles, one-sided: first later than second). Items are the units, so bursts within an
+ * item count once.
+ */
+export function comparePositions(a: number[], b: number[]): { meanA: number; meanB: number; p: number; shuffles: number; atLeast: number } {
+  const SH = 20_000;
+  const mean = (x: number[]) => x.reduce((s, v) => s + v, 0) / x.length;
+  if (!a.length || !b.length) return { meanA: a.length ? mean(a) : NaN, meanB: b.length ? mean(b) : NaN, p: NaN, shuffles: SH, atLeast: 0 };
+  const obs = mean(a) - mean(b);
+  const all = [...a, ...b];
+  let seed = 9876, atLeast = 0;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+  for (let k = 0; k < SH; k++) {
+    for (let i = all.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [all[i], all[j]] = [all[j], all[i]]; }
+    if (mean(all.slice(0, a.length)) - mean(all.slice(a.length)) >= obs) atLeast++;
+  }
+  return { meanA: mean(a), meanB: mean(b), p: (atLeast + 1) / (SH + 1), shuffles: SH, atLeast };
+}
+
+export function compareSentence(target: string, other: string, c: { meanA: number; meanB: number; p: number; shuffles: number; atLeast: number }): string {
+  if (!Number.isFinite(c.p)) return "";
+  const pt = c.atLeast === 0 ? `none of ${c.shuffles.toLocaleString("en-NZ")} shuffles did as well, p < ${(1 / (c.shuffles + 1)).toFixed(5)}` : `p = ${c.p.toFixed(4)}`;
+  return `Looks to ${target} came on average ${Math.round(c.meanA * 100)}% of the way through their item; looks ${other} came ${Math.round(c.meanB * 100)}% of the way through (difference: ${pt}).`;
 }

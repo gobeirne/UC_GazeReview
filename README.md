@@ -64,7 +64,7 @@ The strip across the top of the timeline shows the whole recording: segments abo
 
 The plane is the view from the camera: the video sits at the camera position, the person's right is on the left of the plane and up is up. Each frame's gaze is a point in degrees from the camera.
 
-- The **heatmap** shows where gaze spent time. *Heatmap of* chooses which frames: the segment shown (or all segments), only the stretch highlighted on the timeline, or nothing.
+- The **heatmap** shows where gaze spent time. *Heatmap of* chooses which frames: the segment shown (or all segments), only the stretch highlighted on the timeline, the time before each saved response (the *Window before saves* length, once an event timeline is lined up), or nothing.
 - The **trail** shows the last 2 s up to the playback position.
 - The dashed **circle** is the centre of the main on-screen cluster found by the model.
 - **Drag** to highlight the times when gaze was inside the box; they are marked along the top of the timeline.
@@ -118,6 +118,8 @@ The panel's main result counts **events**, not looks: how many events had at lea
 *Window before saves* sets how far before each save a look counts (5–30 s; 10 s by default). Choose it from what you've seen in the video before looking at the result. Saves less than 2 s apart (several items saved by one page, or a final submit) count as one moment, so the same looks aren't counted several times; in the raster they share a row labelled with all their items.
 
 **Where in each item the looks fall.** The panel also reports a test that needs no window: each item runs from the previous save to its own, a look's position is how far through the item it starts (0 to 1), and each item with looks contributes the median position of its looks. If looks had nothing to do with answering, about half the items would have that value past halfway; a one-sided sign test gives the p value. Only items analysed from start to end are used. The figure's item-by-item panel shows the positions as a histogram under the staircase.
+
+**Compared with looks elsewhere.** When a region is chosen in *Count looks to*, looks to anywhere else off the screen (other regions and unlabelled, with the same length filter) are analysed the same way and compared: the panel, caption and report give both average positions and a shuffle test of whether looks to the chosen region come later in their items than looks elsewhere (items as the units, 20,000 shuffles). In the figure, looks elsewhere are drawn in orange in the item-by-item rows and as a second set of bars in the position histogram, which shows the share of each kind of look in each tenth of the item.
 
 *Count each look once, within the timeline* (on by default) counts a look only for the item being answered when it happened: from the previous save to this one, not also in the next item's minute. It also keeps the chance comparison and panel B's heatmap to the timeline's span (from its start to its finish), so other parts of the recording, such as before the timeline starts, don't affect them.
 

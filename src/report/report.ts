@@ -29,6 +29,7 @@ export interface ReportData {
   figurePng: string;
   caption: string;
   positions?: PositionResult;
+  compareText?: string;
 }
 
 /** One-sentence result used in the figure caption and the report. */
@@ -87,6 +88,7 @@ export function buildReportHtml(d: ReportData): string {
 
 <h2>Result</h2>
 ${d.positions?.items ? `<p class="result">${esc(positionSentence(d.target, d.positions))}</p>` : ""}
+${d.compareText ? `<p class="result">${esc(d.compareText)}</p>` : ""}
 <p class="result">${esc(resultSentence(d.target, d.peri))}</p>
 
 <h2>Summary</h2>
@@ -133,7 +135,7 @@ ${s.lookMode === "stretches"
 ${s.minLookMs ? ` Looks shorter than ${s.minLookMs / 1000} s were left out.` : ""}${s.minRegionFrames ? ` Looks with fewer than ${s.minRegionFrames} frames inside the region were left out.` : ""}</p>
 <p>For the test, each saved response with its whole window analysed was counted as having a look if a look to ${esc(d.target)} started in the ${d.peri.windowMs / 1000} s before it. Chance was estimated by placing the same number of responses at random times in the analysed video ${SHUFFLES} times (fixed seed) and counting the same way. The p value is the share of placements with at least as many responses with a look, with one added to both counts.</p>
 
-<p>Where in each item looks fell needs no window: each item runs from the previous save to its own, and a look's position is how far through the item it started. Each item with looks contributes the median position of its looks, so a burst of looks within one item counts once. The main test compares the average of these values with the 50% expected if looks were unrelated to answering, using 100,000 simulations in which each item's value is a single random position; treating each item's looks as one burst in this way gives the widest spread chance could have, so the test does not overstate the result. A one-sided sign test (items above halfway) is given as well. Only items analysed from start to end are used.</p>
+<p>Where in each item looks fell needs no window: each item runs from the previous save to its own, and a look's position is how far through the item it started. Each item with looks contributes the median position of its looks, so a burst of looks within one item counts once. The main test compares the average of these values with the 50% expected if looks were unrelated to answering, using 100,000 simulations in which each item's value is a single random position; treating each item's looks as one burst in this way gives the widest spread chance could have, so the test does not overstate the result. A one-sided sign test (items above halfway) is given as well. Only items analysed from start to end are used. Looks elsewhere off the screen (any other region or unlabelled, with the same length filter) are treated the same way, and the two are compared by shuffling which kind each item value belongs to (20,000 shuffles, items as the units).</p>
 
 <h2>Limits</h2>
 <ul>

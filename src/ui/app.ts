@@ -1207,9 +1207,16 @@ export class App {
   }
 
   /** Which frames the heatmap counts: the segment (or all), the highlighted stretch only, or none. */
-  private heatState(): { showHeat: boolean; heatScope: Interval | null; heatHint: string } {
+  private heatState(): { showHeat: boolean; heatScope: Interval | Interval[] | null; heatHint: string } {
     const mode = this.q<HTMLSelectElement>("#heat-scope").value;
     if (mode === "off") return { showHeat: false, heatScope: null, heatHint: "" };
+    if (mode === "before") {
+      const w = this.timelinePanel.beforeWindows();
+      const secs = (this.rec?.settings.beforeWindowMs ?? 10_000) / 1000;
+      return w.length
+        ? { showHeat: true, heatScope: w, heatHint: `Heatmap: the ${secs} s before each saved response (${w.length})` }
+        : { showHeat: false, heatScope: null, heatHint: "Import and line up an event timeline to show the time before each save" };
+    }
     if (mode === "brush") {
       return this.timeBrush
         ? { showHeat: true, heatScope: this.timeBrush, heatHint: `Heatmap: ${fmtTime(this.timeBrush.start)}–${fmtTime(this.timeBrush.end)}` }
@@ -1605,7 +1612,7 @@ const TEMPLATE = `
         <span>On the plane:</span>
         <label class="check"><input type="radio" name="dragmode" value="highlight" checked> drag to highlight those times</label>
         <label class="check"><input type="radio" name="dragmode" value="region"> label and edit regions</label>
-        <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="off">nothing (off)</option></select></label>
+        <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="before">the time before each saved response</option><option value="off">nothing (off)</option></select></label>
         <button id="fit-plane">Fit view</button>
         <button id="clear-hl">Clear highlights</button>
       </div>
