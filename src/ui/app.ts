@@ -1207,9 +1207,19 @@ export class App {
   }
 
   /** Which frames the heatmap counts: the segment (or all), the highlighted stretch only, or none. */
-  private heatState(): { showHeat: boolean; heatScope: Interval | Interval[] | null; heatHint: string } {
+  private heatState(): { showHeat: boolean; heatScope: Interval | Interval[] | null; heatHint: string; dots?: { h: number; v: number; hot: boolean }[] | null } {
     const mode = this.q<HTMLSelectElement>("#heat-scope").value;
     if (mode === "off") return { showHeat: false, heatScope: null, heatHint: "" };
+    if (mode === "dest") {
+      const w = this.timelinePanel.beforeWindows();
+      const sc = this.scope();
+      const looks = this.events.filter((e) => !sc || (e.start >= sc.start && e.start < sc.end));
+      const dots = looks.map((e) => ({ h: e.destH, v: e.destV, hot: w.some((x) => e.start >= x.start && e.start < x.end) }));
+      const hot = dots.filter((d) => d.hot).length;
+      const secs = (this.rec?.settings.beforeWindowMs ?? 10_000) / 1000;
+      return { showHeat: false, heatScope: null, dots,
+        heatHint: w.length ? `Where ${dots.length} looks went: red = the ${hot} in the ${secs} s before a save, grey = the rest` : `Where ${dots.length} looks went (line up an event timeline to mark those before saves)` };
+    }
     if (mode === "before") {
       const w = this.timelinePanel.beforeWindows();
       const secs = (this.rec?.settings.beforeWindowMs ?? 10_000) / 1000;
@@ -1612,7 +1622,7 @@ const TEMPLATE = `
         <span>On the plane:</span>
         <label class="check"><input type="radio" name="dragmode" value="highlight" checked> drag to highlight those times</label>
         <label class="check"><input type="radio" name="dragmode" value="region"> label and edit regions</label>
-        <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="before">the time before each saved response</option><option value="off">nothing (off)</option></select></label>
+        <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="before">the time before each saved response</option><option value="dest">where each look went (dots)</option><option value="off">nothing (off)</option></select></label>
         <button id="fit-plane">Fit view</button>
         <button id="clear-hl">Clear highlights</button>
       </div>

@@ -233,7 +233,12 @@ export class TimelinePanel {
     const comparison = otherPositions ? comparePositions(positions.values, otherPositions.values) : undefined;
     const otherLabel = `elsewhere off the screen`;
     const compareText = comparison ? compareSentence(where, otherLabel, comparison) : "";
-    const panelB = (this.box.querySelector<HTMLSelectElement>("#tl-panelb")?.value ?? "timeline") as "timeline" | "before";
+    const panelB = (this.box.querySelector<HTMLSelectElement>("#tl-panelb")?.value ?? "timeline") as "timeline" | "before" | "dest";
+    const bw = this.beforeWindows();
+    const inSpan = (t: number) => !span || (t >= span.start && t <= span.end);
+    const dots = panelB === "dest"
+      ? this.looksFor(glances).filter((g) => inSpan(g.start)).map((g) => ({ h: g.destH, v: g.destV, hot: bw.some((w) => g.start >= w.start && g.start < w.end) }))
+      : undefined;
     const caption = figureCaption(target, peri, panelA, positions) + (compareText ? " " + compareText : "");
     const fig = drawFigure({
       title: `Looks to ${target} around saved responses`,
@@ -243,7 +248,8 @@ export class TimelinePanel {
       rowChanged: usedGroups.map((g) => g.some((e) => e.change_type === "revision")),
       gaze, view: this.host.planeView(), regions, caption, panelA, staircase,
       heatSpan: rec.settings.countOnce !== false && span ? span : undefined,
-      heatWindows: panelB === "before" ? this.beforeWindows() : undefined,
+      heatWindows: panelB === "before" ? bw : undefined,
+      dots,
       positions: panelA === "staircase" ? positions : undefined, coverage,
       otherPositions: panelA === "staircase" ? otherPositions : undefined,
       regionStats: [
@@ -413,7 +419,7 @@ export class TimelinePanel {
           <button data-act="export-figure">Export figure (PNG)</button>
           <button data-act="export-report">Export report (HTML)</button>
           <button data-act="export-csv">Export responses (CSV)</button>
-          <label class="small">Panel B <select id="tl-panelb"><option value="timeline">gaze during the timeline</option><option value="before">gaze in the window before each save</option></select></label>
+          <label class="small">Panel B <select id="tl-panelb"><option value="timeline">gaze during the timeline</option><option value="before">gaze in the window before each save</option><option value="dest">where each look went (dots)</option></select></label>
           <label class="small">Panel A <select id="tl-panela"><option value="staircase">item by item against time</option><option value="aligned">aligned to each save, with histogram</option></select></label>
           <label class="check small"><input type="checkbox" id="tl-include-text"> Include item wording and responses</label>
         </div>

@@ -23,6 +23,8 @@ export interface PlaneState {
   heatScope: Interval | Interval[] | null;
   /** A note drawn at the top of the plane about what the heatmap shows. */
   heatHint: string;
+  /** Destinations of looks, drawn as dots (hot = in the window before a save). */
+  dots?: { h: number; v: number; hot: boolean }[] | null;
   trailMs: number;
   /** Frames tracked live during playback, drawn when there is no saved analysis at the playhead. */
   live: { trail: LivePoint[]; point: LivePoint | null } | null;
@@ -230,6 +232,16 @@ export class GazePlane {
         ctx.globalAlpha = 0.12 + 0.78 * (Math.log1p(c) / lm);
         ctx.fillStyle = heatRgb;
         ctx.fillRect(X(V.h0 + x), Y(V.v1 - y), s + 0.5, s + 0.5);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Destinations of looks: others grey underneath, those before a save on top.
+    if (st.dots) {
+      for (const hot of [false, true]) {
+        ctx.fillStyle = hot ? cssVar("--dest-hot") : cssVar("--dest-other");
+        ctx.globalAlpha = hot ? 0.9 : 0.55;
+        for (const d of st.dots) if (d.hot === hot && Number.isFinite(d.h)) { ctx.beginPath(); ctx.arc(X(d.h), Y(d.v), hot ? 4 : 3, 0, Math.PI * 2); ctx.fill(); }
       }
       ctx.globalAlpha = 1;
     }

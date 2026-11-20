@@ -21,6 +21,8 @@
   --playhead: #c8173f;
   --danger: #a3172f;
   --live: #b45309;
+  --dest-hot: #c8173f;
+  --dest-other: #7b8794;
   --mark-first: #126b91;
   --mark-revision: #bb6624;
   --mark-resave: #8e96a0;
@@ -50,6 +52,8 @@
     --playhead: #ff5c7d;
     --danger: #ff6b81;
     --live: #f5a524;
+    --dest-hot: #ff5c7d;
+    --dest-other: #9aa7b2;
     --mark-first: #4fb0d8;
     --mark-revision: #f0974e;
     --mark-resave: #9aa3ad;

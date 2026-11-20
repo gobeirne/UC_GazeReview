@@ -24,6 +24,8 @@ export interface FigureData {
   otherPositions?: PositionResult;
   /** Panel B heatmap only from these windows (e.g. the time before each save). */
   heatWindows?: { start: number; end: number }[];
+  /** Panel B as destination dots instead of a heatmap. */
+  dots?: { h: number; v: number; hot: boolean }[];
   /** Only frames in this video span go into panel B's heatmap. */
   heatSpan?: { start: number; end: number };
   /** Where in each item looks fall (staircase panel). */
@@ -143,7 +145,7 @@ function drawPeriHist(ctx: CanvasRenderingContext2D, p: PeriResult, g: { L: numb
 
 function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: FontFn) {
   ctx.fillStyle = C.ink; font(18, 650); ctx.textAlign = "left";
-  ctx.fillText(d.heatWindows ? `B   Where gaze went in the ${d.peri.windowMs / 1000} s before each save` : d.heatSpan ? "B   Where gaze went (during the timeline)" : "B   Where gaze went (whole analysed video)", b.x, b.y + 12);
+  ctx.fillText(d.dots ? "B   Where each look went" : d.heatWindows ? `B   Where gaze went in the ${d.peri.windowMs / 1000} s before each save` : d.heatSpan ? "B   Where gaze went (during the timeline)" : "B   Where gaze went (whole analysed video)", b.x, b.y + 12);
   const V = d.view, g = d.gaze;
   const top = b.y + 50, availH = b.h - 110;
   const s = Math.min(b.w / (V.h1 - V.h0), availH / (V.v1 - V.v0));
@@ -163,7 +165,7 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
     max = Math.max(max, ++cells[y * nx + x]);
   }
   const lm = Math.log1p(max);
-  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+  if (!d.dots) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
     const c = cells[y * nx + x];
     if (!c) continue;
     ctx.fillStyle = `rgba(${C.heat[0]},${C.heat[1]},${C.heat[2]},${(0.12 + 0.8 * Math.log1p(c) / lm).toFixed(3)})`;
@@ -188,6 +190,20 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
     ctx.fillStyle = "rgba(255,255,255,0.88)"; ctx.fillRect(x0 + 2, y0 - 20, tw + 8, 18);
     ctx.fillStyle = r.colour; ctx.fillText(r.name, x0 + 6, y0 - 6);
   }
+  if (d.dots) {
+    for (const hot of [false, true]) {
+      ctx.fillStyle = hot ? "rgba(200,23,63,0.85)" : "rgba(123,135,148,0.5)";
+      for (const p of d.dots) if (p.hot === hot && Number.isFinite(p.h) && p.h >= V.h0 && p.h <= V.h1 && p.v >= V.v0 && p.v <= V.v1) {
+        ctx.beginPath(); ctx.arc(X(p.h), Y(p.v), hot ? 4.5 : 3.5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    const nh = d.dots.filter((p) => p.hot).length;
+    font(13); ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(200,23,63,0.85)"; ctx.beginPath(); ctx.arc(ox + 8, oy + ph + 76, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = C.ink; ctx.fillText(`looks starting in the ${d.peri.windowMs / 1000} s before a save (${nh})`, ox + 18, oy + ph + 80);
+    ctx.fillStyle = "rgba(123,135,148,0.5)"; ctx.beginPath(); ctx.arc(ox + 8, oy + ph + 96, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = C.ink; ctx.fillText(`all other looks away (${d.dots.length - nh})`, ox + 18, oy + ph + 100);
+  }
   // Camera.
   ctx.strokeStyle = C.ink; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(0), Y(0), 6, 0, Math.PI * 2); ctx.stroke();
   ctx.fillStyle = C.ink; font(12); ctx.textAlign = "center"; ctx.fillText("camera", X(0), Y(0) - 10);
@@ -197,7 +213,7 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
   ctx.textAlign = "center"; ctx.fillText("Degrees from the camera, as seen from the camera", ox + pw / 2, oy + ph + 58);
   // Region summary.
   if (d.regionStats?.length) {
-    let y = oy + ph + 92;
+    let y = oy + ph + (d.dots ? 132 : 92);
     font(14, 650); ctx.textAlign = "left"; ctx.fillStyle = C.ink;
     ctx.fillText("Region", b.x, y); ctx.textAlign = "right"; ctx.fillText("Looks", b.x + 330, y); ctx.fillText("Share of time", b.x + 440, y);
     font(14);

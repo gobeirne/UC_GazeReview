@@ -64,7 +64,7 @@ The strip across the top of the timeline shows the whole recording: segments abo
 
 The plane is the view from the camera: the video sits at the camera position, the person's right is on the left of the plane and up is up. Each frame's gaze is a point in degrees from the camera.
 
-- The **heatmap** shows where gaze spent time. *Heatmap of* chooses which frames: the segment shown (or all segments), only the stretch highlighted on the timeline, the time before each saved response (the *Window before saves* length, once an event timeline is lined up), or nothing.
+- The **heatmap** shows where gaze spent time. *Heatmap of* chooses which frames: the segment shown (or all segments), only the stretch highlighted on the timeline, the time before each saved response (the *Window before saves* length, once an event timeline is lined up), or nothing. *Where each look went (dots)* replaces the heatmap with one dot per look away at its destination: the turning point of the out-and-back loop (the frame furthest from where gaze was just before the look, averaged with the frames within 3° of it). A heatmap counts frames, so brief glances are swamped by time on the screen and smeared along their path; destinations show where each glance actually went. With an event timeline lined up, looks starting in the window before a save are red and the rest grey.
 - The **trail** shows the last 2 s up to the playback position.
 - The dashed **circle** is the centre of the main on-screen cluster found by the model.
 - **Drag** to highlight the times when gaze was inside the box; they are marked along the top of the timeline.

@@ -18,6 +18,13 @@ export interface GazeEvent {
   lidMin: number;
   /** Frames inside each labelled region during the look (region index → frames). */
   inRegion: Record<number, number>;
+  /**
+   * Where the look went: its turning point. The frame furthest from where gaze was just before the
+   * look (the far end of the out-and-back loop), averaged with the frames within 3° of it, which are
+   * the moments gaze rested there. Less smeared than the frames of the whole look.
+   */
+  destH: number;
+  destV: number;
 }
 
 /**
@@ -57,7 +64,8 @@ export function findEvents(g: GazeSeries, lab: Int16Array, minFrames: number, br
     if (cur && cur.n >= minFrames) {
       let region = ELSEWHERE, best = 0;
       for (const [r, c] of cur.counts) if (r >= 0 && c > best) { best = c; region = r; }
-      events.push({ start: g.t[cur.s], end: g.t[cur.e] + dt, frames: cur.n, region, peakH: g.h[cur.pk], peakV: g.v[cur.pk], peakDist: cur.pd, lidMin: cur.lid, inRegion: Object.fromEntries([...cur.counts].filter(([r]) => r >= 0)) });
+      const dest = destination(g, cur.s, cur.e);
+      events.push({ start: g.t[cur.s], end: g.t[cur.e] + dt, frames: cur.n, region, peakH: g.h[cur.pk], peakV: g.v[cur.pk], peakDist: cur.pd, lidMin: cur.lid, inRegion: Object.fromEntries([...cur.counts].filter(([r]) => r >= 0)), destH: dest.h, destV: dest.v });
     }
     cur = null; noneRun = 0;
   };
@@ -97,4 +105,17 @@ export function labelPoint(h: number, v: number, regions: Region[], g: GazeSerie
   }
   if (regions.some((r) => r.isScreen) || !g) return ELSEWHERE;
   return Math.hypot(h - g.model.screenH, v - g.model.screenV) <= g.model.screenRadius ? SCREEN : ELSEWHERE;
+}
+
+/** Turning point of a look between frames s and e (see GazeEvent.destH). */
+export function destination(g: GazeSeries, s: number, e: number): { h: number; v: number } {
+  // Where gaze was just before: the last good frame before the look, or the screen centre.
+  let oh = g.model.screenH, ov = g.model.screenV;
+  for (let k = s - 1; k >= Math.max(0, s - 5); k--) if (g.ok[k] && !g.breakBefore[k + 1]) { oh = g.h[k]; ov = g.v[k]; break; }
+  let far = -1, fd = -1;
+  for (let k = s; k <= e; k++) if (g.ok[k]) { const d = Math.hypot(g.h[k] - oh, g.v[k] - ov); if (d > fd) { fd = d; far = k; } }
+  if (far < 0) return { h: NaN, v: NaN };
+  let sh = 0, sv = 0, n = 0;
+  for (let k = s; k <= e; k++) if (g.ok[k] && Math.hypot(g.h[k] - g.h[far], g.v[k] - g.v[far]) <= 3) { sh += g.h[k]; sv += g.v[k]; n++; }
+  return { h: sh / n, v: sv / n };
 }

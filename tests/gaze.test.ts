@@ -131,3 +131,33 @@ describe("screen region check", () => {
     expect(screenWarning([])).toBe("");
   });
 });
+
+describe("look destinations", () => {
+  test("a glance's destination is its far end, not the smeared path", async () => {
+    const g = buildGaze([simulate({ glances: Array.from({ length: 12 }, (_, k) => 600 + k * 650), glanceFrames: 7 })], rec);
+    const ev = findEvents(g, classify(g, []), 2);
+    for (const e of ev) {
+      expect(Math.abs(e.destH - (-40))).toBeLessThan(6);
+      expect(Math.abs(e.destV - (-5))).toBeLessThan(6);
+    }
+  });
+});
+
+describe("destination of an out-and-back loop", () => {
+  test("ignores the frames travelling there and back", async () => {
+    const { destination } = await import("../src/analysis/events");
+    // 3 frames on screen at (0,-15), 7 out, 7 resting near (-38,-8) with noise, 7 back, 3 on screen.
+    const pts: [number, number][] = [];
+    for (let i = 0; i < 3; i++) pts.push([0, -15]);
+    for (let i = 1; i <= 7; i++) pts.push([-38 * i / 8, -15 + 7 * i / 8]);
+    for (let i = 0; i < 7; i++) pts.push([-38 + (i % 3) - 1, -8 + ((i * 2) % 3) - 1]);
+    for (let i = 7; i >= 1; i--) pts.push([-38 * i / 8, -15 + 7 * i / 8]);
+    for (let i = 0; i < 3; i++) pts.push([0, -15]);
+    const n = pts.length;
+    const g = { n, t: Float64Array.from(pts, (_, i) => i * 33), h: Float32Array.from(pts, (p) => p[0]), v: Float32Array.from(pts, (p) => p[1]),
+      ok: new Uint8Array(n).fill(1), breakBefore: new Uint8Array(n), model: { screenH: 0, screenV: -15 } } as never;
+    const d = destination(g, 3, n - 4);
+    expect(Math.abs(d.h + 38)).toBeLessThan(2);
+    expect(Math.abs(d.v + 8)).toBeLessThan(2);
+  });
+});
