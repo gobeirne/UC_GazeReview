@@ -135,7 +135,7 @@ main { padding: 0 18px 32px; }
 
 .timeline { margin-top: 18px; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px 4px; }
 #overview { width: 100%; height: 58px; display: block; touch-action: none; cursor: pointer; }
-#detail { width: 100%; height: 320px; display: block; touch-action: none; cursor: text; margin-top: 8px; }
+#detail { width: 100%; height: 360px; display: block; touch-action: none; cursor: text; margin-top: 8px; }
 .legend { margin-left: auto; font-size: 12px; color: var(--muted); }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 8px; vertical-align: -1px; }
 td .swatch { margin-left: 0; }
@@ -210,3 +210,11 @@ td { padding: 4px 6px; border-bottom: 1px solid var(--rule); }
 .tl-table tr.revision td:nth-child(5) { color: var(--mark-revision); font-weight: 600; }
 .tl-table td.ans { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .linked { font-size: 13px; }
+
+.mark-bar button { padding: 3px 8px; font-size: 13px; }
+.mark-bar button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.marks { max-height: 280px; overflow: auto; }
+.marks input { padding: 2px 4px; font-size: 12px; }
+.marks tr[data-id] { cursor: pointer; }
+#seq-canvas { width: 100%; display: block; border: 1px solid var(--rule); border-radius: 6px; cursor: pointer; }
+.seq-stats { margin: 8px 0 0; padding-left: 18px; }

@@ -94,6 +94,10 @@ export interface RecordingSettings {
   beforeWindowMs: number;
   /** Count each look only for the item being answered (since the previous save), and compare with chance only within the timeline's span. */
   countOnce: boolean;
+  /** Noise gate for speech: threshold in dB (null = 12 dB above the quiet background), bridging and minimum length (ms). */
+  gateDb: number | null;
+  gateHoldMs: number;
+  gateMinMs: number;
 }
 
 export const DEFAULT_SETTINGS: RecordingSettings = {
@@ -112,7 +116,22 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   lookMode: "standard",
   beforeWindowMs: 10_000,
   countOnce: true,
+  gateDb: null,
+  gateHoldMs: 400,
+  gateMinMs: 250,
 };
+
+/** A mark made by the reviewer while watching. Submit marks are instants (end = start). */
+export type AnnotationKind = "look" | "obscured" | "speech" | "submit";
+export interface Annotation {
+  id: string;
+  kind: AnnotationKind;
+  start: number;
+  end: number;
+  note: string;
+  origin: "manual";
+  createdAt: number;
+}
 
 /** How video time relates to the clock times of an event timeline. */
 export interface SyncInfo {
@@ -151,6 +170,10 @@ export interface Recording {
   linked?: LinkedVideo[];
   /** The video file's own date header (ms UTC), if it had one. */
   fileDateUtcMs?: number;
+  /** Reviewer's marks: phone looks, eyes obscured, speech, submits seen. */
+  annotations?: Annotation[];
+  /** Sound level in 20 ms bins (dB), from the audio track; the audio itself is never kept. */
+  audioEnv?: { binMs: number; db: Float32Array };
   createdAt: number;
   updatedAt: number;
 }

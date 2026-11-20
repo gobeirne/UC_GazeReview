@@ -137,6 +137,25 @@ Item wording and saved responses are left out unless *Include item wording and r
 
 A saved response marks when the response was submitted (usually on moving to the next page, or an autosave), not when it was chosen, so looks connected with it come before the mark.
 
+### Marks and speech
+
+While watching, the reviewer can mark what the tracking can't see reliably, for example glances made with the hands around the eyes:
+
+- **G** at the start and again at the end of a look to the phone;
+- **O** for a stretch where the eyes are obscured and the direction can't be judged;
+- **S** for speech;
+- **K** at a submit (click) seen in the video.
+
+The same marks can be made with the buttons under the video; Esc cancels a mark in progress. Marks appear in a *marked* lane on the timeline and in the *Marks* panel, where their times can be typed and a note added. Every mark is kept with its kind, times, note and when it was made, and goes into exports, so anyone can check it later.
+
+*Detect speech* reads the sound track (Opus, decoded in the browser) and keeps only its level, in 20 ms steps; the audio itself is not stored. A noise gate marks speech wherever the level is above a threshold, 12 dB above the quiet background by default or set with the slider, bridging pauses under 400 ms and dropping sounds under 250 ms. The level, threshold and detected speech appear in a *sound* lane on the timeline. Speech marked by hand is added to the detected speech.
+
+### Sequence per item
+
+With an event timeline lined up, the *Sequence per item* section of the Event timeline panel shows one row per item: speech (blue), looks to the chosen region (amber; dashed if marked by hand), eyes obscured (grey), and the submit (green; solid if marked from the video, outlined if it is the platform's save time). The rows can be lined up on the submit, the start of the look or the end of speech, ordered by item or by the time from the look to submit, and limited to automatic looks, hand-marked looks, or both. Rows without the chosen event stay, labelled.
+
+The anchors follow fixed rules: the submit is a *submit seen* mark between the previous save and 3 s after this one, otherwise the save; the look is the last look starting in the item at or before the submit; the end of speech is the end of the last speech before that look (or before the submit, if there is no look). Below the rows: how many items show speech, then a look, then submit; the exceptions; items with more than one look; the median times from the end of speech to the look and from the end of the look to submit; and the same count with automatic looks only, so the effect of hand marking is visible. *Export sequence figure (PNG)* saves it with a legend, the counts and the settings. Clicking a row goes to 5 s before its anchor.
+
 ### A second synchronised video
 
 *Add another synchronised video…* opens a second recording, such as a screen recording, in its own window. It plays, pauses, seeks and changes speed with the main video. Its starting offset is taken from the two files' date headers when both have one (check it), and can be adjusted in 1 s and 0.1 s steps in its window; the offset is saved with the recording. Sound is off in the second window unless turned on there. If the browser blocks the window, allow pop-ups for the page.

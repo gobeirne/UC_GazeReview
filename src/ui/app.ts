@@ -16,6 +16,8 @@ import { GazePlane, type Rect } from "./plane";
 import { Detail, Overview } from "./timeline";
 import { TimelinePanel } from "./timelinePanel";
 import { LinkedVideoWindow } from "./linkedVideo";
+import { audioEnvelope, defaultGate, gateSegments, levelStats } from "../audio/envelope";
+import type { Annotation, AnnotationKind } from "../store/types";
 import { download, esc, fmtTime, parseTime, REGION_COLOURS, SCREEN_COLOUR } from "./util";
 
 interface Busy { label: string; done: number; total: number; abort: AbortController }
@@ -64,6 +66,7 @@ export class App {
   private linkedFor: string | null = null;
   private linkedFile: File | null = null;
   private linkedWasOpen = false;
+  private marking: { kind: AnnotationKind; start: number } | null = null;
   private linked = new LinkedVideoWindow();
   private liveFpr: Fingerprinter | null = null;
   private sidecarTimer = 0;
@@ -93,6 +96,7 @@ export class App {
       pause: () => this.video.pause(),
       analysis: () => ({ gaze: this.gaze, labels: this.labels, glances: this.events, regions: this.rec?.regions ?? [], coverage: this.coverage }),
       planeView: () => ({ ...this.plane.view }),
+      marks: () => this.marksForAnalysis(),
       say: (m) => this.say(m),
       redraw: () => this.drawCanvases(),
     });
@@ -214,6 +218,30 @@ export class App {
     this.plane.onRegionDone = (id) => { this.editRegionId = id; this.renderRegionForm(); this.saveRec(); this.recompute(); };
     this.plane.onRegionSelect = (id) => { this.editRegionId = id; this.pendingRegion = null; this.renderRegionForm(); };
     this.q("#label-now").addEventListener("click", () => { this.video.pause(); this.labelLookingNow(); });
+    this.root.querySelectorAll<HTMLButtonElement>("[data-mark]").forEach((b) => b.addEventListener("click", () => this.toggleMark(b.dataset.mark as AnnotationKind)));
+    this.q("#marks").addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>("[data-act]");
+      const tr = (e.target as HTMLElement).closest<HTMLElement>("tr[data-id]");
+      if (b?.dataset.act === "del-mark" && this.rec) {
+        this.rec.annotations = (this.rec.annotations ?? []).filter((a) => a.id !== b.dataset.id);
+        this.saveRec(); this.renderMarks(); this.timelinePanel.renderAnalysis(); return;
+      }
+      if (tr && !(e.target as HTMLElement).closest("input")) { const a = this.rec?.annotations?.find((x) => x.id === tr.dataset.id); if (a) { this.video.pause(); this.seek(a.start); } }
+    });
+    this.q("#marks").addEventListener("change", (e) => {
+      const t = e.target as HTMLInputElement;
+      const a = this.rec?.annotations?.find((x) => x.id === t.dataset.id);
+      if (!a) return;
+      if (t.dataset.field === "note") a.note = t.value;
+      if (t.dataset.field === "start" || t.dataset.field === "end") {
+        const v = parseTime(t.value);
+        if (Number.isFinite(v)) { a[t.dataset.field] = v; if (a.kind === "submit") a.end = a.start; if (a.end < a.start) [a.start, a.end] = [a.end, a.start]; }
+      }
+      this.saveRec(); this.renderMarks(); this.timelinePanel.renderAnalysis();
+    });
+    this.q("#detect-speech").addEventListener("click", () => this.detectSpeech());
+    this.q("#gate").addEventListener("change", () => this.readGate());
+    this.q("#gate-auto").addEventListener("change", () => this.readGate());
     this.q<HTMLSelectElement>("#heat-scope").addEventListener("change", () => { this.plane.invalidateHeat(); this.drawCanvases(); });
     this.q("#fit-plane").addEventListener("click", () => { this.plane.fitTo(this.gaze); this.drawCanvases(); });
     this.q("#clear-hl").addEventListener("click", () => { this.planeBrush = null; this.timeBrush = null; this.renderHeatScope(); this.drawCanvases(); });
@@ -266,9 +294,13 @@ export class App {
       else if (e.key === "." || e.key === "ArrowRight") { e.preventDefault(); this.stepFrames(e.shiftKey ? 10 : 1); }
       else if (e.key === "n") this.selectEvent(this.nextEvent(1));
       else if (e.key === "p") this.selectEvent(this.nextEvent(-1));
-      else if (e.key === "Escape") { this.planeBrush = null; this.timeBrush = null; this.pendingRegion = null; this.editRegionId = null; this.renderRegionForm(); }
+      else if (e.key === "Escape") { this.planeBrush = null; this.timeBrush = null; this.pendingRegion = null; this.editRegionId = null; this.renderRegionForm(); if (this.marking) { this.marking = null; this.renderMarkStatus(); } }
       else if ((e.key === "Delete" || e.key === "Backspace") && this.editRegionId) { e.preventDefault(); this.deleteRegion(this.editRegionId); }
       else if (e.key === "l") { this.video.pause(); this.labelLookingNow(); }
+      else if (e.key === "g") this.toggleMark("look");
+      else if (e.key === "o") this.toggleMark("obscured");
+      else if (e.key === "s") this.toggleMark("speech");
+      else if (e.key === "k") this.toggleMark("submit");
     });
   }
 
@@ -935,6 +967,101 @@ export class App {
     this.renderCapturePanel();
   }
 
+  // ---------- Marks made while watching ----------
+
+  /** Starts or ends a mark of this kind at the playhead (submit marks are instants). */
+  private toggleMark(kind: AnnotationKind) {
+    if (!this.rec) return;
+    const t = this.playhead();
+    const add = (start: number, end: number, k: AnnotationKind) => {
+      const a: Annotation = { id: newId("mark"), kind: k, start: Math.min(start, end), end: Math.max(start, end), note: "", origin: "manual", createdAt: Date.now() };
+      (this.rec!.annotations ??= []).push(a);
+      this.rec!.annotations.sort((x, y) => x.start - y.start);
+    };
+    if (kind === "submit") { add(t, t, "submit"); this.say(`Submit seen marked at ${fmtTime(t)}.`); }
+    else if (this.marking && this.marking.kind === kind) {
+      if (Math.abs(t - this.marking.start) < 20) { this.say("Move the video on before ending the mark."); return; }
+      add(this.marking.start, t, kind);
+      this.say(`${MARK_NAMES[kind]} marked ${fmtTime(Math.min(this.marking.start, t))}–${fmtTime(Math.max(this.marking.start, t))}.`);
+      this.marking = null;
+    } else {
+      if (this.marking) add(this.marking.start, t, this.marking.kind);
+      this.marking = { kind, start: t };
+    }
+    this.renderMarkStatus();
+    this.saveRec(); this.renderMarks(); this.timelinePanel.renderAnalysis();
+  }
+
+  private renderMarkStatus() {
+    const st = this.q("#mark-status");
+    st.textContent = this.marking ? `Marking ${MARK_NAMES[this.marking.kind].toLowerCase()} from ${fmtTime(this.marking.start)}; press ${MARK_KEYS[this.marking.kind]} again at its end.` : "";
+    this.root.querySelectorAll<HTMLButtonElement>("[data-mark]").forEach((b) => b.classList.toggle("on", this.marking?.kind === b.dataset.mark));
+  }
+
+  private renderMarks() {
+    const box = this.q("#marks");
+    const list = this.rec?.annotations ?? [];
+    const env = this.rec?.audioEnv;
+    const segs = this.speechSegments();
+    this.q("#speech-summary").textContent = env ? `${segs.length} stretches of speech detected (threshold ${this.gateDb().toFixed(0)} dB; background ${levelStats(env as never).quiet.toFixed(0)} dB, loud ${levelStats(env as never).loud.toFixed(0)} dB)` : "Not detected yet.";
+    box.innerHTML = list.length ? `<table><thead><tr><th>Mark</th><th>From</th><th>To</th><th>Note</th><th></th></tr></thead><tbody>` +
+      list.map((a) => `<tr data-id="${a.id}"><td><span class="swatch" style="background:${MARK_COLOURS[a.kind]}"></span>${MARK_NAMES[a.kind]}</td>
+        <td><input data-id="${a.id}" data-field="start" value="${fmtTime(a.start)}" size="8"></td>
+        <td>${a.kind === "submit" ? "" : `<input data-id="${a.id}" data-field="end" value="${fmtTime(a.end)}" size="8">`}</td>
+        <td><input data-id="${a.id}" data-field="note" value="${esc(a.note)}" size="16"></td>
+        <td><button data-act="del-mark" data-id="${a.id}">Delete</button></td></tr>`).join("") + `</tbody></table>`
+      : `<p class="muted">No marks yet. While watching, press G at the start and end of a look to the phone, O for eyes obscured, S for speech, and K at a submit you can see.</p>`;
+  }
+
+  /** What the analysis uses: manual looks, obscured stretches, speech (detected and marked), submits seen. */
+  private marksForAnalysis() {
+    const a = this.rec?.annotations ?? [];
+    const pick = (k: AnnotationKind) => a.filter((x) => x.kind === k).map((x) => ({ start: x.start, end: x.end }));
+    const speech = normalise([...this.speechSegments(), ...pick("speech")]);
+    return { looks: pick("look"), obscured: pick("obscured"), speech, submits: a.filter((x) => x.kind === "submit").map((x) => x.start) };
+  }
+
+  private gateDb(): number {
+    const env = this.rec?.audioEnv;
+    if (!env) return NaN;
+    return this.rec!.settings.gateDb ?? defaultGate(env);
+  }
+
+  private speechSegments(): Interval[] {
+    const env = this.rec?.audioEnv;
+    if (!env) return [];
+    const s = this.rec!.settings;
+    return gateSegments(env, this.gateDb(), s.gateHoldMs, s.gateMinMs);
+  }
+
+  private async detectSpeech() {
+    if (!this.rec || this.busy) return;
+    if (!this.src || !this.index) return this.say(`Open ${this.rec.fileName ?? "the video file"} first.`);
+    try {
+      this.say("Reading the sound track…");
+      const env = await audioEnvelope(this.src, this.index, this.file, (f) => this.say(`Reading the sound track: ${Math.round(f * 100)}%`));
+      this.rec.audioEnv = env;
+      await this.saveRec();
+      this.renderGate(); this.renderMarks(); this.timelinePanel.renderAnalysis();
+      this.say(`Sound read: ${this.speechSegments().length} stretches of speech above the threshold. Adjust the threshold if needed.`);
+    } catch (e) { this.say(`Couldn’t read the sound track: ${(e as Error).message}`); }
+  }
+
+  private readGate() {
+    if (!this.rec) return;
+    const auto = this.q<HTMLInputElement>("#gate-auto").checked;
+    this.rec.settings.gateDb = auto ? null : parseFloat(this.q<HTMLInputElement>("#gate").value);
+    this.saveRec(); this.renderGate(); this.renderMarks(); this.timelinePanel.renderAnalysis();
+  }
+
+  private renderGate() {
+    const env = this.rec?.audioEnv;
+    const g = this.q<HTMLInputElement>("#gate");
+    this.q<HTMLInputElement>("#gate-auto").checked = this.rec?.settings.gateDb == null;
+    if (env) { const st = levelStats(env as never); g.min = String(Math.floor(st.quiet - 10)); g.max = String(Math.ceil(st.loud + 5)); g.value = String(this.gateDb()); }
+    this.q("#gate-value").textContent = env ? `${this.gateDb().toFixed(0)} dB` : "";
+  }
+
   // ---------- Live tracking during playback ----------
 
   /** Runs the face tracker on the frame just shown (not saved). */
@@ -1202,6 +1329,9 @@ export class App {
       gaze: this.gaze, labels: this.labels, events: this.events, regions: this.rec?.regions ?? [], win: this.win,
       playhead: ph, timeBrush: this.timeBrush, planeBrush: this.planeBrush, selectedEvent: this.selectedEvent,
       marks: this.timelinePanel.marks(),
+      sound: this.rec?.audioEnv ? { env: this.rec.audioEnv, threshold: this.gateDb(), speech: this.speechSegments() } : null,
+      annotations: this.rec?.annotations ?? [],
+      marking: this.marking ? { kind: this.marking.kind, start: this.marking.start } : null,
     }, this.timeDraft);
     if (this.captureCanvas && this.capture?.stream) this.drawCapturePreview();
   }
@@ -1278,6 +1408,9 @@ export class App {
     this.renderBusy();
     this.timelinePanel.render();
     this.renderLinked();
+    this.renderMarks();
+    this.renderGate();
+    this.renderMarkStatus();
     this.drawCanvases();
   }
 
@@ -1469,6 +1602,10 @@ export class App {
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
+const MARK_NAMES: Record<AnnotationKind, string> = { look: "Phone look", obscured: "Eyes obscured", speech: "Speech", submit: "Submit seen" };
+const MARK_KEYS: Record<AnnotationKind, string> = { look: "G", obscured: "O", speech: "S", submit: "K" };
+const MARK_COLOURS: Record<AnnotationKind, string> = { look: "#a8580a", obscured: "#8e96a0", speech: "#3b6fd8", submit: "#2f9e57" };
+
 function distanceText(m: { distMedian: number; distRange: [number, number]; distMissing: number; distanceCorrected: boolean }, on: boolean): string {
   if (!Number.isFinite(m.distMedian)) return "not recorded (analysed by an earlier version; re-analyse to use it)";
   const range = `${Math.round(m.distRange[0] * 100)}–${Math.round(m.distRange[1] * 100)}% of usual`;
@@ -1611,10 +1748,14 @@ const TEMPLATE = `
         </div>
         <div id="readout" class="readout" aria-live="off" hidden></div>
         <div class="row"><button id="label-now">Label where they’re looking now</button><span class="muted small">or press L</span></div>
+        <div class="row mark-bar"><span class="small">Mark:</span>
+          <button data-mark="look">Phone look (G)</button><button data-mark="obscured">Eyes obscured (O)</button>
+          <button data-mark="speech">Speech (S)</button><button data-mark="submit">Submit seen (K)</button></div>
+        <p id="mark-status" class="small warn-line"></p>
       </div>
       <div id="capture-panel" class="capture" hidden></div>
       <p class="time-row"><span id="time" class="num big"></span></p>
-      <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they’re looking · Esc clear highlights</p>
+      <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they’re looking · G / O / S start and end a mark (phone look, eyes obscured, speech) · K submit seen · Esc clear highlights</p>
     </section>
     <section class="plane-col">
       <canvas id="plane" aria-label="Where the person is looking, seen from the camera"></canvas>
@@ -1657,6 +1798,15 @@ const TEMPLATE = `
       <h3>Glances away <span id="event-count" class="muted small"></span></h3>
       <label class="small">Show <select id="event-filter"></select></label>
       <div id="events" class="events"></div>
+    </section>
+    <section class="panel">
+      <h3>Marks</h3>
+      <div id="marks" class="marks"></div>
+      <h3>Speech from the sound</h3>
+      <div class="row small"><button id="detect-speech">Detect speech</button>
+        <label class="check"><input type="checkbox" id="gate-auto" checked> automatic threshold</label>
+        <label>Threshold <input type="range" id="gate" min="-80" max="0" step="1"> <span id="gate-value" class="num"></span></label></div>
+      <p id="speech-summary" class="small muted"></p>
     </section>
     <section class="panel">
       <h3>Regions</h3>

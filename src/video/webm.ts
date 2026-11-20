@@ -48,16 +48,18 @@ export interface WebmIndex {
   skippedLaced: number;
   /** The file's DateUTC header (when the muxer says the file was made), ms since 1970 UTC. */
   dateUtcMs?: number;
+  /** The first audio track, if any: codec settings and its blocks (timestamps in ms, byte ranges). */
+  audio?: { codecId: string; codecPrivate?: Uint8Array; sampleRate: number; channels: number; frames: { t: number; offset: number; size: number }[] };
 }
 
 const ID = {
   EBML: 0x1a45dfa3, Segment: 0x18538067, Info: 0x1549a966, TimecodeScale: 0x2ad7b1, Duration: 0x4489, DateUTC: 0x4461,
   Tracks: 0x1654ae6b, TrackEntry: 0xae, TrackNumber: 0xd7, TrackType: 0x83, CodecID: 0x86, CodecPrivate: 0x63a2,
-  Video: 0xe0, PixelWidth: 0xb0, PixelHeight: 0xba, Cluster: 0x1f43b675, Timecode: 0xe7,
+  Video: 0xe0, PixelWidth: 0xb0, PixelHeight: 0xba, Audio: 0xe1, SamplingFrequency: 0xb5, Channels: 0x9f, Cluster: 0x1f43b675, Timecode: 0xe7,
   SimpleBlock: 0xa3, BlockGroup: 0xa0, Block: 0xa1,
 };
 /** Elements we step into instead of over. */
-const MASTERS = new Set([ID.Segment, ID.Info, ID.Tracks, ID.TrackEntry, ID.Video, ID.Cluster, ID.BlockGroup]);
+const MASTERS = new Set([ID.Segment, ID.Info, ID.Tracks, ID.TrackEntry, ID.Video, ID.Audio, ID.Cluster, ID.BlockGroup]);
 
 class Reader {
   private buf: Uint8Array = new Uint8Array(0);
@@ -96,7 +98,7 @@ function readFloat(b: Uint8Array): number {
 }
 function readString(b: Uint8Array): string { return new TextDecoder().decode(b).replace(/\0+$/, ""); }
 
-interface Track { number: number; type: number; codecId: string; codecPrivate?: Uint8Array; width: number; height: number }
+interface Track { number: number; type: number; codecId: string; codecPrivate?: Uint8Array; width: number; height: number; sampleRate?: number; channels?: number }
 
 export async function indexWebm(src: ByteSource, onProgress?: (fraction: number) => void): Promise<WebmIndex> {
   const r = new Reader(src);
@@ -107,6 +109,8 @@ export async function indexWebm(src: ByteSource, onProgress?: (fraction: number)
   let track: Track | null = null;
   let clusterTc = 0;
   let videoTrack = -1;
+  let audioTrack = -1;
+  const audioRaw: { tc: number; offset: number; size: number }[] = [];
   const raw: { tc: number; offset: number; size: number; flagKey: boolean | null }[] = [];
   let skippedLaced = 0;
   let blockGroupDepthEnd = -1;
@@ -141,6 +145,7 @@ export async function indexWebm(src: ByteSource, onProgress?: (fraction: number)
         const v = tracks.find((t) => t.type === 1);
         if (!v) throw new Error("No video track found.");
         videoTrack = v.number;
+        audioTrack = tracks.find((t) => t.type === 2)?.number ?? -1;
       }
       pos = dataStart;
       continue;
@@ -162,12 +167,27 @@ export async function indexWebm(src: ByteSource, onProgress?: (fraction: number)
       case ID.CodecPrivate: if (track) track.codecPrivate = (await r.bytes(dataStart, size)).slice(); break;
       case ID.PixelWidth: if (track) track.width = readUint(await r.bytes(dataStart, size)); break;
       case ID.PixelHeight: if (track) track.height = readUint(await r.bytes(dataStart, size)); break;
+      case ID.SamplingFrequency: if (track) track.sampleRate = readFloat(await r.bytes(dataStart, size)); break;
+      case ID.Channels: if (track) track.channels = readUint(await r.bytes(dataStart, size)); break;
       case ID.Timecode: clusterTc = readUint(await r.bytes(dataStart, size)); break;
       case ID.SimpleBlock:
       case ID.Block: {
         const b = await r.bytes(dataStart, Math.min(size, 16));
         const tn = vint(b, 0, false);
-        if (!tn || tn.value !== videoTrack) break;
+        if (!tn) break;
+        if (tn.value === audioTrack && audioTrack >= 0) {
+          const relA = new DataView(b.buffer, b.byteOffset + tn.len, 2).getInt16(0);
+          const flagsA = b[tn.len + 2];
+          const hdrA = tn.len + 3;
+          if (!(flagsA & 0x06)) audioRaw.push({ tc: clusterTc + relA, offset: dataStart + hdrA, size: size - hdrA });
+          else {
+            // Laced block (several audio frames in one block): split it into frames.
+            const head = await r.bytes(dataStart, Math.min(size, 4096));
+            for (const f of unlace(head, hdrA, size, (flagsA >> 1) & 3)) audioRaw.push({ tc: clusterTc + relA, offset: dataStart + f.offset, size: f.size });
+          }
+          break;
+        }
+        if (tn.value !== videoTrack) break;
         const rel = new DataView(b.buffer, b.byteOffset + tn.len, 2).getInt16(0);
         const flags = b[tn.len + 2];
         const hdr = tn.len + 3;
@@ -215,7 +235,38 @@ export async function indexWebm(src: ByteSource, onProgress?: (fraction: number)
     frames,
     skippedLaced,
     dateUtcMs,
+    audio: (() => {
+      const a = tracks.find((t) => t.type === 2);
+      if (!a || !audioRaw.length) return undefined;
+      return { codecId: a.codecId, codecPrivate: a.codecPrivate, sampleRate: a.sampleRate || 48000, channels: a.channels || 1, frames: audioRaw.map((f) => ({ t: f.tc * msPerTick, offset: f.offset, size: f.size })) };
+    })(),
   };
+}
+
+/** Frames of a laced block: lacing 1 = Xiph, 2 = fixed size, 3 = EBML. Offsets are from the block's data start. */
+export function unlace(b: Uint8Array, start: number, blockSize: number, lacing: number): { offset: number; size: number }[] {
+  const count = b[start] + 1;
+  let p = start + 1;
+  const sizes: number[] = [];
+  if (lacing === 1) {
+    for (let i = 0; i < count - 1; i++) { let sz = 0, x: number; do { x = b[p++]; sz += x; } while (x === 255); sizes.push(sz); }
+  } else if (lacing === 3) {
+    const first = vint(b, p, false)!; p += first.len; sizes.push(first.value);
+    for (let i = 1; i < count - 1; i++) {
+      const d = vint(b, p, false)!; p += d.len;
+      const bias = 2 ** (7 * d.len - 1) - 1; // signed difference from the previous size
+      sizes.push(sizes[i - 1] + (d.value - bias));
+    }
+  } else if (lacing === 2) {
+    const each = (blockSize - p) / count;
+    for (let i = 0; i < count - 1; i++) sizes.push(each);
+  }
+  const used = sizes.reduce((a, x) => a + x, 0);
+  sizes.push(blockSize - p - used);
+  const out: { offset: number; size: number }[] = [];
+  let o = p;
+  for (const sz of sizes) { out.push({ offset: o, size: sz }); o += sz; }
+  return out;
 }
 
 async function bitstreamKey(r: Reader, codecId: string, offset: number, size: number): Promise<boolean> {

@@ -1,7 +1,7 @@
 import { ELSEWHERE, NONE, SCREEN, type GazeEvent } from "../analysis/events";
 import { indexAt, type GazeSeries } from "../analysis/gazeModel";
 import type { Interval } from "../analysis/intervals";
-import type { Region, Segment } from "../store/types";
+import type { Annotation, Region, Segment } from "../store/types";
 import type { Rect } from "./plane";
 import type { TimelineMark } from "./timelinePanel";
 import { cssVar, fitCanvas, fmtTime } from "./util";
@@ -90,6 +90,11 @@ export interface DetailState {
   planeBrush: Rect | null;
   selectedEvent: number;
   marks: TimelineMark[];
+  /** Sound level with the gate threshold and the detected speech. */
+  sound?: { env: { binMs: number; db: Float32Array }; threshold: number; speech: Interval[] } | null;
+  /** Reviewer's marks, and a mark in progress. */
+  annotations?: Annotation[];
+  marking?: { kind: Annotation["kind"]; start: number } | null;
 }
 
 export function markColour(kind: TimelineMark["kind"]): string {
@@ -155,7 +160,9 @@ export class Detail {
     const muted = cssVar("--muted"), rule = cssVar("--rule");
 
     const marksH = st.marks.length ? 18 : 0;
-    const laneH = Math.max(50, (h - 70 - marksH) / 2);
+    const soundH = st.sound ? 26 : 0;
+    const annH = (st.annotations?.length || st.marking) ? 16 : 0;
+    const laneH = Math.max(50, (h - 70 - marksH - soundH - annH) / 2);
     const lanes = [
       { name: "Horizontal", y: 6, key: "h" as const, colour: cssVar("--trace-h"), centre: st.gaze?.model.screenH ?? 0, up: "their left", down: "their right" },
       { name: "Vertical", y: 10 + laneH, key: "v" as const, colour: cssVar("--trace-v"), centre: st.gaze?.model.screenV ?? 0, up: "up", down: "down" },
@@ -267,6 +274,46 @@ export class Detail {
         if (x - lastLabel > 28) { ctx.fillStyle = cssVar("--ink"); ctx.fillText(m.label, x + 3, my + 11); lastLabel = x; }
       }
       ctx.font = "11px system-ui, sans-serif";
+    }
+
+    // Sound level, the gate threshold, and detected speech.
+    if (soundH && st.sound) {
+      const sy = evY + 8 + marksH, sh = soundH - 4;
+      ctx.fillStyle = muted; ctx.textAlign = "right"; ctx.fillText("sound", L - 4, sy + sh / 2 + 4);
+      ctx.fillStyle = cssVar("--field"); ctx.fillRect(L, sy, plotW, sh);
+      ctx.fillStyle = "rgba(59,111,216,0.22)";
+      for (const g of st.sound.speech) if (g.end > st.win.start && g.start < st.win.end) ctx.fillRect(X(g.start), sy, Math.max(1, X(g.end) - X(g.start)), sh);
+      const env = st.sound.env, lo = st.sound.threshold - 25, hi = st.sound.threshold + 20;
+      const Yd = (db: number) => sy + sh - Math.max(0, Math.min(1, (db - lo) / (hi - lo))) * sh;
+      ctx.strokeStyle = "#3b6fd8"; ctx.lineWidth = 1; ctx.beginPath();
+      const b0 = Math.max(0, Math.floor(st.win.start / env.binMs)), b1 = Math.min(env.db.length - 1, Math.ceil(st.win.end / env.binMs));
+      const stepB = Math.max(1, Math.floor((b1 - b0) / plotW));
+      for (let b = b0; b <= b1; b += stepB) {
+        let mx = -Infinity; for (let k = b; k < Math.min(b1 + 1, b + stepB); k++) if (env.db[k] > mx) mx = env.db[k];
+        const x = X(b * env.binMs), y = Yd(Number.isFinite(mx) ? mx : lo);
+        if (b === b0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = cssVar("--elsewhere"); ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(L, Yd(st.sound.threshold) + 0.5); ctx.lineTo(R, Yd(st.sound.threshold) + 0.5); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // Reviewer's marks.
+    if (annH) {
+      const ay = evY + 8 + marksH + soundH, ah = annH - 4;
+      ctx.fillStyle = muted; ctx.textAlign = "right"; ctx.fillText("marked", L - 4, ay + ah / 2 + 4);
+      ctx.fillStyle = cssVar("--field"); ctx.fillRect(L, ay, plotW, ah);
+      const col: Record<string, string> = { look: "#a8580a", obscured: "#8e96a0", speech: "#3b6fd8", submit: "#2f9e57" };
+      for (const a of st.annotations ?? []) {
+        if (a.end < st.win.start || a.start > st.win.end) continue;
+        ctx.fillStyle = col[a.kind];
+        if (a.kind === "submit") ctx.fillRect(X(a.start) - 1.5, ay - 2, 3, ah + 4);
+        else ctx.fillRect(X(a.start), ay + (a.kind === "speech" ? 0 : ah / 2), Math.max(2, X(a.end) - X(a.start)), ah / 2);
+      }
+      if (st.marking) {
+        const a = Math.min(st.marking.start, st.playhead), b = Math.max(st.marking.start, st.playhead);
+        ctx.fillStyle = col[st.marking.kind]; ctx.globalAlpha = 0.5;
+        ctx.fillRect(X(a), ay, Math.max(2, X(b) - X(a)), ah); ctx.globalAlpha = 1;
+      }
     }
 
     // Time axis.

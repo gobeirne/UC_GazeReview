@@ -126,9 +126,10 @@ const bytesOf = (a: ArrayBufferView) => new Uint8Array(a.buffer, a.byteOffset, a
  * no image-derived data in it.
  */
 export function exportJson(rec: Recording, runs: Run[], opts: { thumbnails: boolean; timelineText?: boolean } = { thumbnails: true }): string {
-  const recording: Recording = opts.timelineText === false && rec.timeline
+  let recording: Recording = opts.timelineText === false && rec.timeline
     ? { ...rec, timeline: { ...rec.timeline, data: { ...rec.timeline.data, events: rec.timeline.data.events.map(({ question_text: _q, ...e }) => ({ ...e, answer: "" })) } } }
     : rec;
+  if (recording.audioEnv) recording = { ...recording, audioEnv: { binMs: recording.audioEnv.binMs, db: b64(bytesOf(recording.audioEnv.db)) as unknown as Float32Array } };
   return JSON.stringify({
     format: FORMAT,
     version: 1,
@@ -167,5 +168,7 @@ export function importJson(text: string): { recording: Recording; runs: Run[] } 
       cols: Object.fromEntries(FIELDS.map((k) => [k, typeof cols[k] === "string" ? f32(cols[k]!) : new Float32Array(t.length).fill(NaN)])),
     };
   });
-  return { recording: o.recording as Recording, runs };
+  const recording = o.recording as Recording;
+  if (recording.audioEnv && typeof recording.audioEnv.db === "string") recording.audioEnv = { binMs: recording.audioEnv.binMs, db: f32(recording.audioEnv.db as unknown as string) };
+  return { recording, runs };
 }

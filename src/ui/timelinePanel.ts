@@ -9,6 +9,8 @@ import { cssVar, download, downloadBlob, esc, fitCanvas, fmtTime } from "./util"
 import { classify, dwell, ELSEWHERE, findEvents, SCREEN } from "../analysis/events";
 import { totalLength } from "../analysis/intervals";
 import { drawFigure } from "../report/figure";
+import { buildEpisodes, sequenceStats, statsLines, type Anchor, type Episode, type LookFilter } from "../analysis/sequence";
+import { drawSequence } from "../report/sequenceFigure";
 import { buildCsv, buildReportHtml, figureCaption, type EventRow, type ReportData } from "../report/report";
 
 export interface TimelineHost {
@@ -20,6 +22,8 @@ export interface TimelineHost {
   analysis(): { gaze: GazeSeries | null; labels: Int16Array | null; glances: GazeEvent[]; regions: Region[]; coverage: Interval[] };
   /** The gaze plane's current view, for the figure. */
   planeView(): { h0: number; h1: number; v0: number; v1: number };
+  /** Reviewer's marks and detected speech (video ms). */
+  marks(): { looks: Interval[]; obscured: Interval[]; speech: Interval[]; submits: number[] };
   say(s: string): void;
   redraw(): void;
 }
@@ -135,6 +139,7 @@ export class TimelinePanel {
     }
     if (act === "use-file-date" && rec.fileDateUtcMs) await this.setStart(localStamp(rec.fileDateUtcMs), "video file’s date (unconfirmed)");
     if (act === "export-figure" || act === "export-report" || act === "export-csv") this.exportReport(act);
+    if (act === "export-seq") this.exportSequence();
     if (act === "use-timeline-start" && rec.timeline) await this.setStart(rec.timeline.data.attempt.started, "assumed to start with the timeline");
     if (act === "line-up") {
       const i = parseInt(this.box.querySelector<HTMLSelectElement>("#tl-lineup")?.value ?? "-1", 10);
@@ -160,6 +165,7 @@ export class TimelinePanel {
     }
     if (t.id === "tl-order") this.dateOrder = t.value as "dmy" | "mdy";
     if (t.id === "tl-region") { this.region = t.value; this.renderAnalysis(); }
+    if (t.id?.startsWith("seq-")) this.renderSequence();
     if (t.id === "tl-minframes" || t.id === "tl-lookmode" || t.id === "tl-window" || t.id === "tl-once") {
       const rec = this.host.rec();
       if (rec) {
@@ -321,6 +327,91 @@ export class TimelinePanel {
     return { peri, groups, prevs, span };
   }
 
+  // ---------- Sequence per item ----------
+
+  private seqOptions() {
+    const v = (id: string, d: string) => this.box.querySelector<HTMLSelectElement>(id)?.value ?? d;
+    const [before, after] = v("#seq-range", "30000,15000").split(",").map(Number);
+    return { anchor: v("#seq-anchor", "submit") as Anchor, sort: v("#seq-sort", "item") as "item" | "delay", filter: v("#seq-looks", "both") as LookFilter, before, after };
+  }
+
+  /** Items with their speech, looks, obscured stretches and submit, by the fixed anchor rules. */
+  episodes(filter: LookFilter): Episode[] {
+    const rec = this.host.rec();
+    if (!rec?.timeline || !this.synced()) return [];
+    const evs = rec.timeline.data.events;
+    const times = evs.map((e) => this.videoTime(e));
+    const groups = groupEvents(times);
+    const span = this.span();
+    const { glances } = this.host.analysis();
+    const auto = this.selectedLooks(glances, rec.settings.minLookMs).map((g) => ({ start: g.start, end: g.end }));
+    const m = this.host.marks();
+    const items = groups.map((g, i) => {
+      const its = g.members.map((k) => evs[k]);
+      return { label: groupLabel(its), changed: its.some((e) => e.change_type === "revision"), from: i ? times[groups[i - 1].members[groups[i - 1].members.length - 1]] : span?.start ?? g.t - BEFORE, save: g.t };
+    });
+    return buildEpisodes(items, auto, m.looks, m.obscured, m.speech, m.submits, filter);
+  }
+
+  private seqHits: { y0: number; y1: number; e: Episode }[] = [];
+
+  renderSequence() {
+    const cv = this.box.querySelector<HTMLCanvasElement>("#seq-canvas");
+    const list = this.box.querySelector("#seq-stats");
+    if (!cv || !list || !this.synced()) return;
+    const o = this.seqOptions();
+    const eps = this.episodes(o.filter);
+    cv.style.height = `${Math.max(240, eps.length * 18 + 110)}px`;
+    const { w, h, ctx } = fitCanvas(cv);
+    const target = this.targetName();
+    this.seqHits = drawSequence(ctx, w, h, eps, { ...o, target });
+    const lines = statsLines(sequenceStats(eps), target);
+    if (o.filter === "both") {
+      const autoOnly = sequenceStats(this.episodes("auto"));
+      lines.push(`With automatic looks only: speech, look, submit in ${autoOnly.withSequence} of ${autoOnly.items}`);
+    }
+    list.innerHTML = lines.map((l) => `<li>${esc(l)}</li>`).join("");
+    if (!cv.dataset.wired) {
+      cv.dataset.wired = "1";
+      cv.addEventListener("click", (ev) => {
+        const y = ev.clientY - cv.getBoundingClientRect().top;
+        const hit = this.seqHits.find((r) => y >= r.y0 && y < r.y1);
+        if (!hit) return;
+        const o2 = this.seqOptions();
+        const t = o2.anchor === "glance" ? hit.e.glance?.start : o2.anchor === "speech" ? hit.e.speechEnd : hit.e.submit;
+        this.host.pause(); this.host.seek(Math.max(0, (t ?? hit.e.submit) - 5000));
+      });
+    }
+  }
+
+  private targetName(): string {
+    const { regions } = this.host.analysis();
+    return this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
+  }
+
+  private exportSequence() {
+    const rec = this.host.rec();
+    if (!rec || !this.synced()) return;
+    const o = this.seqOptions();
+    const eps = this.episodes(o.filter);
+    if (!eps.length) return this.host.say("There are no items to show yet.");
+    const target = this.targetName();
+    const lines = statsLines(sequenceStats(eps), target);
+    if (o.filter === "both") { const a = sequenceStats(this.episodes("auto")); lines.push(`With automatic looks only: speech, look, submit in ${a.withSequence} of ${a.items}`); }
+    const W = 1600, H = Math.max(700, eps.length * 22 + 360 + lines.length * 19);
+    const cv = document.createElement("canvas");
+    cv.width = W * 2; cv.height = H * 2;
+    const ctx = cv.getContext("2d")!; ctx.scale(2, 2);
+    const s = rec.settings;
+    drawSequence(ctx, W, H, eps, {
+      ...o, target, statsLines: lines,
+      title: `Speech, looks to ${target} and submit, item by item`,
+      subtitle: `${rec.name} · ${eps.length} items · lined up on the ${o.anchor === "speech" ? "end of speech" : o.anchor === "glance" ? "start of the look" : "submit"} · ${o.sort === "delay" ? "ordered by time from look to submit" : "in item order"}`,
+      settingsLine: `Looks: ${o.filter === "both" ? "automatic and marked by hand" : o.filter === "auto" ? "automatic only" : "marked by hand only"}; automatic looks with ${s.minRegionFrames || "any"} frames in the region; speech: noise gate ${s.gateDb === null ? "12 dB above background" : `${s.gateDb} dB`}, gaps under ${s.gateHoldMs} ms bridged, stretches under ${s.gateMinMs} ms dropped. Anchors: last look before submit; end of the last speech before that look; submit seen if marked, else the platform's save.`,
+    });
+    cv.toBlob((b) => b && downloadBlob(`${rec.name.replace(/[^\w.-]+/g, "_")}-sequence.png`, b), "image/png");
+  }
+
   /** Looks as formed for this analysis: the app's looks, or "stretches" (every region treated as ordinary). */
   private looksFor(glances: GazeEvent[]): GazeEvent[] {
     const rec = this.host.rec();
@@ -424,6 +515,18 @@ export class TimelinePanel {
           <label class="check small"><input type="checkbox" id="tl-include-text"> Include item wording and responses</label>
         </div>
       </div>
+      <div class="tl-seq" ${synced ? "" : "hidden"}>
+        <h4>Sequence per item</h4>
+        <div class="row small">
+          <label>Line up on <select id="seq-anchor"><option value="submit">submit</option><option value="glance">start of the look</option><option value="speech">end of speech</option></select></label>
+          <label>Order <select id="seq-sort"><option value="item">by item</option><option value="delay">by time from look to submit</option></select></label>
+          <label>Looks <select id="seq-looks"><option value="both">automatic and marked by hand</option><option value="auto">automatic only</option><option value="manual">marked by hand only</option></select></label>
+          <label>Show <select id="seq-range"><option value="20000,10000">−20 to +10 s</option><option value="30000,15000" selected>−30 to +15 s</option><option value="60000,20000">−60 to +20 s</option></select></label>
+          <button data-act="export-seq">Export sequence figure (PNG)</button>
+        </div>
+        <canvas id="seq-canvas" aria-label="Speech, looks and submit for each item, lined up"></canvas>
+        <ul id="seq-stats" class="small seq-stats"></ul>
+      </div>
       <div class="tl-table"></div>`;
     this.renderAnalysis();
   }
@@ -479,7 +582,7 @@ export class TimelinePanel {
     }).join("");
     const table = this.box.querySelector(".tl-table");
     if (table) table.innerHTML = `<table><thead><tr><th>Video</th><th>Clock</th><th>Item</th><th>Saved</th><th>Change</th><th>Last look away before</th></tr></thead><tbody>${rows}</tbody></table>`;
-    if (!synced || !gaze) { this.drawHist(null); return; }
+    if (!synced || !gaze) { this.drawHist(null); this.renderSequence(); return; }
     if (rec.settings.lookMode !== "stretches" && regions.length && !regions.some((r) => r.isScreen)) {
       this.drawHist(null);
       const note = this.box.querySelector("#tl-hist-note");
@@ -493,6 +596,7 @@ export class TimelinePanel {
     const pos = itemPositions(items, chosen.map((g) => g.start), coverage, dt);
     const note = this.box.querySelector("#tl-hist-note");
     const where = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
+    this.renderSequence();
     const oth = this.otherLooks(glances);
     const othPos = oth.length ? itemPositions(items, oth.map((g) => g.start), coverage, dt) : null;
     const cmp = othPos && pos.items ? compareSentence(where, "elsewhere off the screen", comparePositions(pos.values, othPos.values)) : "";
