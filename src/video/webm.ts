@@ -2,7 +2,7 @@
  * Minimal WebM/Matroska demuxer: walks the file once and returns the video track's
  * codec settings plus an index of every video frame (timestamp, byte range, keyframe).
  *
- * Browser-recorded WebM (MediaRecorder, as used by proctoring tools) often has no Cues
+ * Browser-recorded WebM (MediaRecorder, as used by web recording tools) often has no Cues
  * (seek index), unknown-size Segment and Cluster elements, and sometimes no Duration.
  * The walk below copes with all of these: master elements are entered rather than
  * skipped, so an unknown size never needs resolving. Frame payloads are not kept.
@@ -46,10 +46,12 @@ export interface WebmIndex {
   frames: FrameEntry[];
   /** Laced blocks are not expected in video and are skipped; counted here. */
   skippedLaced: number;
+  /** The file's DateUTC header (when the muxer says the file was made), ms since 1970 UTC. */
+  dateUtcMs?: number;
 }
 
 const ID = {
-  EBML: 0x1a45dfa3, Segment: 0x18538067, Info: 0x1549a966, TimecodeScale: 0x2ad7b1, Duration: 0x4489,
+  EBML: 0x1a45dfa3, Segment: 0x18538067, Info: 0x1549a966, TimecodeScale: 0x2ad7b1, Duration: 0x4489, DateUTC: 0x4461,
   Tracks: 0x1654ae6b, TrackEntry: 0xae, TrackNumber: 0xd7, TrackType: 0x83, CodecID: 0x86, CodecPrivate: 0x63a2,
   Video: 0xe0, PixelWidth: 0xb0, PixelHeight: 0xba, Cluster: 0x1f43b675, Timecode: 0xe7,
   SimpleBlock: 0xa3, BlockGroup: 0xa0, Block: 0xa1,
@@ -100,6 +102,7 @@ export async function indexWebm(src: ByteSource, onProgress?: (fraction: number)
   const r = new Reader(src);
   let timecodeScale = 1_000_000; // ns per tick (default 1 ms)
   let durationTicks = NaN;
+  let dateUtcMs: number | undefined;
   const tracks: Track[] = [];
   let track: Track | null = null;
   let clusterTc = 0;
@@ -147,6 +150,12 @@ export async function indexWebm(src: ByteSource, onProgress?: (fraction: number)
     switch (id.value) {
       case ID.TimecodeScale: timecodeScale = readUint(await r.bytes(dataStart, size)); break;
       case ID.Duration: durationTicks = readFloat(await r.bytes(dataStart, size)); break;
+      case ID.DateUTC: {
+        // Signed nanoseconds since 2001-01-01T00:00:00 UTC.
+        const b = await r.bytes(dataStart, size);
+        if (size === 8) dateUtcMs = Date.UTC(2001, 0, 1) + Number(new DataView(b.buffer, b.byteOffset, 8).getBigInt64(0) / 1_000_000n);
+        break;
+      }
       case ID.TrackNumber: if (track) track.number = readUint(await r.bytes(dataStart, size)); break;
       case ID.TrackType: if (track) track.type = readUint(await r.bytes(dataStart, size)); break;
       case ID.CodecID: if (track) track.codecId = readString(await r.bytes(dataStart, size)); break;
@@ -205,6 +214,7 @@ export async function indexWebm(src: ByteSource, onProgress?: (fraction: number)
     durationMs,
     frames,
     skippedLaced,
+    dateUtcMs,
   };
 }
 

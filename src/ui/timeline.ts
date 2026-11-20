@@ -3,6 +3,7 @@ import { indexAt, type GazeSeries } from "../analysis/gazeModel";
 import type { Interval } from "../analysis/intervals";
 import type { Region, Segment } from "../store/types";
 import type { Rect } from "./plane";
+import type { TimelineMark } from "./timelinePanel";
 import { cssVar, fitCanvas, fmtTime } from "./util";
 
 /** Whole-recording strip: segments, analysed coverage, playhead, the detail window. */
@@ -34,7 +35,7 @@ export class Overview {
     return Math.max(0, Math.min(this.duration, ((e.clientX - r.left) / r.width) * this.duration));
   }
 
-  draw(duration: number, segments: Segment[], coverage: Interval[], playhead: number, win: Interval | null, selected: string | null) {
+  draw(duration: number, segments: Segment[], coverage: Interval[], playhead: number, win: Interval | null, selected: string | null, marks: TimelineMark[] = []) {
     const { w, h, ctx } = fitCanvas(this.canvas);
     this.duration = Math.max(1, duration); this.width = w;
     const X = (t: number) => (t / this.duration) * w;
@@ -63,6 +64,11 @@ export class Overview {
       if (x1 - x0 > 30) ctx.fillText(s.label || "Segment", x0 + 3, 15, x1 - x0 - 6);
       this.lastSegs.push({ id: s.id, x0, x1 });
     }
+    // Event timeline marks along the top of the field.
+    for (const m of marks) {
+      ctx.fillStyle = markColour(m.kind);
+      ctx.fillRect(X(m.t) - 0.5, 22, m.selected ? 3 : 1.5, 8);
+    }
     // Detail window.
     if (win) {
       ctx.strokeStyle = cssVar("--ink"); ctx.lineWidth = 1;
@@ -83,6 +89,11 @@ export interface DetailState {
   timeBrush: Interval | null;
   planeBrush: Rect | null;
   selectedEvent: number;
+  marks: TimelineMark[];
+}
+
+export function markColour(kind: TimelineMark["kind"]): string {
+  return kind === "revision" ? cssVar("--mark-revision") : kind === "resave" ? cssVar("--mark-resave") : cssVar("--mark-first");
 }
 
 /** VNG-style traces of horizontal and vertical gaze against time, with region bars and events. */
@@ -143,7 +154,8 @@ export class Detail {
     ctx.clearRect(0, 0, w, h);
     const muted = cssVar("--muted"), rule = cssVar("--rule");
 
-    const laneH = Math.max(50, (h - 70) / 2);
+    const marksH = st.marks.length ? 18 : 0;
+    const laneH = Math.max(50, (h - 70 - marksH) / 2);
     const lanes = [
       { name: "Horizontal", y: 6, key: "h" as const, colour: cssVar("--trace-h"), centre: st.gaze?.model.screenH ?? 0, up: "their left", down: "their right" },
       { name: "Vertical", y: 10 + laneH, key: "v" as const, colour: cssVar("--trace-v"), centre: st.gaze?.model.screenV ?? 0, up: "up", down: "down" },
@@ -239,6 +251,23 @@ export class Detail {
       const x0 = X(ev.start), x1 = Math.max(x0 + 2, X(ev.end));
       ctx.fillRect(x0, evY, x1 - x0, 5);
     });
+
+    // Event timeline marks, labelled with the item where there's room.
+    if (marksH) {
+      const my = evY + 8;
+      ctx.fillStyle = muted; ctx.textAlign = "right"; ctx.fillText("events", L - 4, my + 11);
+      ctx.fillStyle = cssVar("--field"); ctx.fillRect(L, my, plotW, marksH - 2);
+      let lastLabel = -Infinity;
+      ctx.textAlign = "left"; ctx.font = "10px system-ui, sans-serif";
+      for (const m of st.marks) {
+        if (m.t < st.win.start || m.t > st.win.end) continue;
+        const x = X(m.t);
+        ctx.fillStyle = markColour(m.kind);
+        ctx.fillRect(x - (m.selected ? 1.5 : 1), my, m.selected ? 3 : 2, marksH - 2);
+        if (x - lastLabel > 28) { ctx.fillStyle = cssVar("--ink"); ctx.fillText(m.label, x + 3, my + 11); lastLabel = x; }
+      }
+      ctx.font = "11px system-ui, sans-serif";
+    }
 
     // Time axis.
     ctx.fillStyle = muted; ctx.textAlign = "center";

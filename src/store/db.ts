@@ -125,13 +125,17 @@ const bytesOf = (a: ArrayBufferView) => new Uint8Array(a.buffer, a.byteOffset, a
  * screen captures with this analysis; leaving them out makes the file smaller and keeps
  * no image-derived data in it.
  */
-export function exportJson(rec: Recording, runs: Run[], opts: { thumbnails: boolean } = { thumbnails: true }): string {
+export function exportJson(rec: Recording, runs: Run[], opts: { thumbnails: boolean; timelineText?: boolean } = { thumbnails: true }): string {
+  const recording: Recording = opts.timelineText === false && rec.timeline
+    ? { ...rec, timeline: { ...rec.timeline, data: { ...rec.timeline.data, events: rec.timeline.data.events.map(({ question_text: _q, ...e }) => ({ ...e, answer: "" })) } } }
+    : rec;
   return JSON.stringify({
     format: FORMAT,
     version: 1,
     exportedAt: new Date().toISOString(),
     thumbnails: opts.thumbnails,
-    recording: rec,
+    timelineText: opts.timelineText !== false,
+    recording,
     runs: runs.map((r) => {
       const { fp, ...rest } = r;
       return {

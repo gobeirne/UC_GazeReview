@@ -14,6 +14,13 @@ export const WHY = { ok: 0, noFace: 1, eyesOut: 2 } as const;
  */
 const EYE_POINTS = [LM.rEyeOuter, LM.rEyeInner, LM.lEyeInner, LM.lEyeOuter, LM.rIrisCentre, LM.lIrisCentre];
 
+/** Length of the head-pose translation (face to camera). Its scale doesn't matter: only ratios are used. */
+export function faceDistance(m: number[] | undefined): number {
+  if (!m || m.length !== 16) return NaN;
+  const d = Math.hypot(m[12], m[13], m[14]); // column-major: translation is the 4th column
+  return d > 0 ? d : NaN;
+}
+
 export function whyInvalid(raw: RawFace | undefined): number {
   return raw ? WHY.eyesOut : WHY.noFace;
 }
@@ -40,6 +47,7 @@ export function measure(raw: RawFace | undefined, gain = 1): FrameValues | null 
     jaw: v(raw.blendshapes?.jawOpen),
     why: WHY.ok,
     gain,
+    dist: faceDistance(raw.transform),
   };
 }
 

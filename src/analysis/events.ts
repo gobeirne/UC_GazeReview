@@ -14,7 +14,7 @@ export interface GazeEvent {
   peakV: number;
   /** Largest angular distance from the screen centre during the event (°). */
   peakDist: number;
-  /** Smallest lid opening during the event relative to the student's median (1 = typical). Low values suggest a blink or a look down rather than a look across. */
+  /** Smallest lid opening during the event relative to the person's median (1 = typical). Low values suggest a blink or a look down rather than a look across. */
   lidMin: number;
 }
 

@@ -1,11 +1,11 @@
 // Copied from UC_TFR (src/tracking/MediaPipeFaceTracker.ts). Changes: detect() accepts any
 // frame source (canvas, OffscreenCanvas, VideoFrame) so decoded video can be analysed, and
-// lower detection/tracking thresholds (see THRESHOLDS) for dim, low-angle exam webcams.
+// lower detection/tracking thresholds (see THRESHOLDS) for dim, low-angle laptop webcams.
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
 /**
- * UC_TFR uses 0.5 / 0.6 / 0.6, tuned for a well-lit face filling a clinic camera. Exam
- * recordings are often dim, shot from below, with the face partly out of frame, and a
+ * UC_TFR uses 0.5 / 0.6 / 0.6, tuned for a well-lit face filling a clinic camera. Laptop
+ * webcam recordings are often dim, shot from below, with the face partly out of frame, and a
  * lost face only comes back when the detector finds it again, so the thresholds are
  * lower here. Wrong landmarks show up on the eye overlay and as gaze far off the plane.
  */

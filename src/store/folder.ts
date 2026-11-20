@@ -47,7 +47,7 @@ export async function chooseFolder(): Promise<boolean> {
 
 export async function forgetFolder() { dir = null; ready = false; await putMeta("folder", undefined); }
 
-/** "exam 12.webm" → "exam 12.gaze.json". */
+/** "session 12.webm" → "session 12.gaze.json". */
 export function sidecarName(videoOrRecordingName: string): string {
   return videoOrRecordingName.replace(/\.(webm|mkv|mp4|mov)$/i, "").replace(/[\\/:*?"<>|]+/g, "_") + ".gaze.json";
 }

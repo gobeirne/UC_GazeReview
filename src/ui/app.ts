@@ -14,6 +14,8 @@ import { analyseGap, chooseDecoderConfig, fileIdentity, trackerClock } from "../
 import { fileSource, indexWebm, medianFrameInterval, type ByteSource, type WebmIndex } from "../video/webm";
 import { GazePlane, type Rect } from "./plane";
 import { Detail, Overview } from "./timeline";
+import { TimelinePanel } from "./timelinePanel";
+import { LinkedVideoWindow } from "./linkedVideo";
 import { download, esc, fmtTime, parseTime, REGION_COLOURS, SCREEN_COLOUR } from "./util";
 
 interface Busy { label: string; done: number; total: number; abort: AbortController }
@@ -58,6 +60,11 @@ export class App {
   private prefs = loadPrefs();
   private lock = new RecordingLock();
   private livePrep = new FramePrep();
+  private timelinePanel!: TimelinePanel;
+  private linkedFor: string | null = null;
+  private linkedFile: File | null = null;
+  private linkedWasOpen = false;
+  private linked = new LinkedVideoWindow();
   private liveFpr: Fingerprinter | null = null;
   private sidecarTimer = 0;
   private sidecarLast = 0;
@@ -78,6 +85,17 @@ export class App {
     this.plane = new GazePlane(this.q("#plane"));
     this.overview = new Overview(this.q("#overview"));
     this.detail = new Detail(this.q("#detail"));
+    this.timelinePanel = new TimelinePanel(this.q("#tl-panel"), {
+      rec: () => this.rec,
+      save: () => this.saveRec(),
+      playhead: () => this.playhead(),
+      seek: (t) => this.seek(t),
+      pause: () => this.video.pause(),
+      analysis: () => ({ gaze: this.gaze, glances: this.events, regions: this.rec?.regions ?? [], coverage: this.coverage }),
+      say: (m) => this.say(m),
+      redraw: () => this.drawCanvases(),
+    });
+    this.linked.onOffsetChange = () => { this.saveRec(); this.renderLinked(); };
     this.wire();
     db.setDbMessageHandler((m) => this.say(m));
     this.recordings = await db.listRecordings();
@@ -121,9 +139,18 @@ export class App {
     this.q<HTMLSelectElement>("#rec-select").addEventListener("change", (e) => this.selectRecording((e.target as HTMLSelectElement).value));
     this.q("#start-capture").addEventListener("click", () => this.beginCapture());
     this.q("#export").addEventListener("click", () => { const m = this.q("#export-menu"); m.hidden = !m.hidden; });
-    this.q("#export-go").addEventListener("click", () => { this.q("#export-menu").hidden = true; this.exportRec(this.q<HTMLInputElement>("#export-thumbs").checked); });
+    this.q("#export-go").addEventListener("click", () => { this.q("#export-menu").hidden = true; this.exportRec(this.q<HTMLInputElement>("#export-thumbs").checked, this.q<HTMLInputElement>("#export-tltext").checked); });
     this.q("#export-cancel").addEventListener("click", () => { this.q("#export-menu").hidden = true; });
     this.q("#folder-btn").addEventListener("click", () => this.folderButton());
+    const linkInput = this.q<HTMLInputElement>("#link-input");
+    this.q("#link-video").addEventListener("click", () => linkInput.click());
+    linkInput.addEventListener("change", () => { const f = linkInput.files?.[0]; linkInput.value = ""; if (f) this.openLinked(f); });
+    this.q("#linked").addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>("[data-act]");
+      if (!b) return;
+      if (b.dataset.act === "open-linked") this.reopenLinked();
+      if (b.dataset.act === "unlink") this.unlink();
+    });
     this.q<HTMLSelectElement>("#folder-videos").addEventListener("change", async (e) => {
       const sel = e.target as HTMLSelectElement;
       const name = sel.value; sel.value = "";
@@ -142,6 +169,7 @@ export class App {
     this.q("#play").addEventListener("click", () => this.togglePlay());
     this.q("#back-frame").addEventListener("click", () => this.stepFrames(-1));
     this.q("#fwd-frame").addEventListener("click", () => this.stepFrames(1));
+    this.root.querySelectorAll<HTMLButtonElement>("[data-jump]").forEach((b) => b.addEventListener("click", () => this.jump(Number(b.dataset.jump))));
     this.q<HTMLSelectElement>("#rate").addEventListener("change", (e) => { this.video.playbackRate = parseFloat((e.target as HTMLSelectElement).value); });
     this.q("#sound").addEventListener("click", () => { this.video.muted = !this.video.muted; this.prefs.muted = this.video.muted; savePrefs(this.prefs); this.renderSound(); });
     this.q<HTMLInputElement>("#volume").addEventListener("input", (e) => {
@@ -271,6 +299,7 @@ export class App {
         await db.putRecording(rec);
         this.recordings = await db.listRecordings();
       }
+      if (ix.dateUtcMs && rec.fileDateUtcMs !== ix.dateUtcMs) { rec.fileDateUtcMs = ix.dateUtcMs; await db.putRecording(rec); }
       this.file = f; this.src = src; this.index = ix;
       if (this.videoUrl) URL.revokeObjectURL(this.videoUrl);
       this.videoUrl = URL.createObjectURL(f);
@@ -301,6 +330,7 @@ export class App {
   private async loadRec(rec: Recording) {
     this.rec = rec;
     this.live.reset(); this.liveLandmarks = null; this.lastLiveT = NaN;
+    if (this.linkedFor !== rec.id) { this.linked.close(); this.linkedFile = null; }
     rec.settings = { ...DEFAULT_SETTINGS, ...rec.settings };
     this.runs = await db.getRuns(rec.id);
     this.scopeSeg = null;
@@ -412,9 +442,9 @@ export class App {
     this.renderRecordingList(); this.renderAll();
   }
 
-  private exportRec(thumbnails: boolean) {
+  private exportRec(thumbnails: boolean, timelineText: boolean) {
     if (!this.rec) return;
-    download(`${this.rec.name.replace(/[^\w.-]+/g, "_")}.gaze.json`, db.exportJson(this.rec, this.runs, { thumbnails }));
+    download(`${this.rec.name.replace(/[^\w.-]+/g, "_")}.gaze.json`, db.exportJson(this.rec, this.runs, { thumbnails, timelineText }));
   }
 
   private async importRec(text: string) {
@@ -617,6 +647,7 @@ export class App {
     if (this.gaze && this.gaze.model.validFraction > 0.2 && (!this.rec.regions.length || this.rec.regions.some((r) => r.auto))) this.autoScreen();
     this.labels = this.gaze ? classify(this.gaze, this.rec.regions) : null;
     this.events = this.gaze && this.labels ? findEvents(this.gaze, this.labels, this.rec.settings.minFrames) : [];
+    this.timelinePanel?.renderAnalysis();
     this.plane.invalidateHeat();
     if (fit) this.planeFitted = false;
     if (!this.planeFitted) { this.plane.fitTo(this.gaze); this.planeFitted = !!this.gaze; }
@@ -715,7 +746,7 @@ export class App {
     this.recompute();
   }
 
-  /** Proposes a region around where the student is looking at the playhead (±0.4 s), from the saved analysis or live tracking. */
+  /** Proposes a region around where the person is looking at the playhead (±0.4 s), from the saved analysis or live tracking. */
   private labelLookingNow() {
     if (!this.rec) return;
     const ph = this.playhead(), hs: number[] = [], vs: number[] = [];
@@ -773,6 +804,7 @@ export class App {
     s.minFrames = Math.max(1, Math.round(num("#set-minframes") || 1));
     s.blinkHoldMs = Math.max(0, num("#set-blink") || 0);
     s.blinkFilter = this.q<HTMLInputElement>("#set-blinkfilter").checked;
+    s.distanceCorrection = this.q<HTMLInputElement>("#set-distance").checked;
     s.blinkLidPct = Math.min(95, Math.max(20, num("#set-blinkpct") || 70));
     s.blinkMaxMs = Math.max(100, num("#set-blinkmax") || 400);
     this.saveRec();
@@ -787,7 +819,7 @@ export class App {
     let rec = this.rec;
     if (rec?.kind === "capture" && !(await this.lock.take(rec.id))) return this.say(`“${rec.name}” is open in another window.`);
     if (!rec || rec.kind !== "capture") {
-      const name = prompt("Name for this screen-capture recording (e.g. student ID and exam)", "");
+      const name = prompt("Name for this screen-capture recording", "");
       if (!name?.trim()) return;
       rec = {
         id: newId("cap"), name: name.trim(), kind: "capture", durationMs: 0, width: 0, height: 0, frameIntervalMs: 1000 / 30,
@@ -819,7 +851,7 @@ export class App {
     this.q("#video-wrap").hidden = on;
     if (!on) return;
     panel.innerHTML = `
-      <p class="hint">Drag over the preview to mark the student’s video. Play it at normal speed, at least at its original size.</p>
+      <p class="hint">Drag over the preview to mark the video to analyse. Play it at normal speed, at least at its original size.</p>
       <div class="cap-stage"><canvas id="cap-preview"></canvas></div>
       <div class="row">
         <label>Player time now <input id="cap-start" value="${fmtTime(this.capturedPlayhead, 0)}" size="9"></label>
@@ -841,7 +873,7 @@ export class App {
     this.q("#cap-go").addEventListener("click", () => {
       const t = parseTime(this.q<HTMLInputElement>("#cap-start").value);
       if (!Number.isFinite(t)) return this.say("Type the time shown in the player, e.g. 12:30.");
-      if (!this.captureCrop) return this.say("Drag over the preview to mark where the student’s video is first.");
+      if (!this.captureCrop) return this.say("Drag over the preview to mark where the video is first.");
       this.capture!.setCrop(this.captureCrop);
       this.capture!.onStatus = (s) => {
         const el = this.q("#cap-status");
@@ -985,6 +1017,8 @@ export class App {
       html = `<div class="where"><span class="swatch" style="background:${colour}"></span>${name}</div>
         <div class="detail">${dir} ${ref}</div><div class="src ${now.source === "live" ? "live" : ""}">${src}</div>`;
     }
+    const ev = this.timelinePanel.readout(ph);
+    if (ev) html += `<div class="src">${esc(ev)}</div>`;
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
   }
 
@@ -1032,7 +1066,7 @@ export class App {
     if (this.rec?.kind === "capture" || !this.video.src) {
       this.capturedPlayhead = t;
       this.q("#time").textContent = fmtTime(t);
-      if (this.rec?.kind === "capture") this.say(`Go to ${fmtTime(t, 1)} in the exam player to see this moment.`);
+      if (this.rec?.kind === "capture") this.say(`Go to ${fmtTime(t, 1)} in the player to see this moment.`);
       return;
     }
     this.video.currentTime = t / 1000;
@@ -1041,6 +1075,13 @@ export class App {
   private togglePlay() {
     if (!this.video.src) return;
     if (this.video.paused) this.video.play(); else this.video.pause();
+  }
+
+  /** Moves the playhead by ms (keeps playing if playing). */
+  private jump(ms: number) {
+    if (!this.video.src) { this.seek(Math.max(0, this.playhead() + ms)); return; }
+    const d = Number.isFinite(this.video.duration) ? this.video.duration : Infinity;
+    this.video.currentTime = Math.min(d, Math.max(0, this.video.currentTime + ms / 1000));
   }
 
   private stepFrames(n: number) {
@@ -1126,6 +1167,8 @@ export class App {
     }
     this.q("#time").textContent = fmtTime(ph);
     this.q("#play").textContent = playing ? "Pause" : "Play";
+    if (this.linked.open) this.linked.follow(this.video.currentTime, playing, this.video.playbackRate);
+    if (this.linked.open !== this.linkedWasOpen) { this.linkedWasOpen = this.linked.open; this.renderLinked(); }
     if (!playing && (this.prefs.live || this.prefs.eyes) && this.tracker.ready && !this.busy && this.video.readyState >= 2 &&
         this.lastAttemptPh !== ph) {
       this.lastAttemptPh = ph;
@@ -1154,10 +1197,11 @@ export class App {
     this.drawEyeOverlay();
     this.renderReadout();
     this.overview.draw(Math.max(this.rec?.durationMs ?? 0, this.coverage[this.coverage.length - 1]?.end ?? 0, 60000),
-      this.rec?.segments ?? [], this.coverage, ph, this.win, this.scopeSeg);
+      this.rec?.segments ?? [], this.coverage, ph, this.win, this.scopeSeg, this.timelinePanel.marks());
     this.detail.draw({
       gaze: this.gaze, labels: this.labels, events: this.events, regions: this.rec?.regions ?? [], win: this.win,
       playhead: ph, timeBrush: this.timeBrush, planeBrush: this.planeBrush, selectedEvent: this.selectedEvent,
+      marks: this.timelinePanel.marks(),
     }, this.timeDraft);
     if (this.captureCanvas && this.capture?.stream) this.drawCapturePreview();
   }
@@ -1215,7 +1259,66 @@ export class App {
     this.renderRegions();
     this.renderSettings();
     this.renderBusy();
+    this.timelinePanel.render();
+    this.renderLinked();
     this.drawCanvases();
+  }
+
+  // ---------- Synchronised second video ----------
+
+  private async openLinked(f: File) {
+    if (!this.rec || this.rec.kind !== "file") return this.say("Open the main video first.");
+    const existing = this.rec.linked?.find((l) => l.fileName === f.name && l.fileSize === f.size);
+    let link = existing;
+    if (!link) {
+      // Suggest the offset from the two files' date headers, if both have one.
+      let offsetMs = 0, offsetSource = "not set: line it up with the buttons in its window";
+      try {
+        const ix = await indexWebm(fileSource(f));
+        if (ix.dateUtcMs && this.rec.fileDateUtcMs && Math.abs(ix.dateUtcMs - this.rec.fileDateUtcMs) < 2 * 3600_000) {
+          offsetMs = ix.dateUtcMs - this.rec.fileDateUtcMs;
+          offsetSource = "from the two files’ dates: check it";
+        }
+      } catch { /* not a WebM, or no date: start at 0 */ }
+      link = { fileName: f.name, fileSize: f.size, offsetMs, offsetSource };
+      this.rec.linked = [link];
+      await this.saveRec();
+    }
+    this.linkedFile = f;
+    this.linkedFor = this.rec.id;
+    if (!this.linked.show(f, link)) this.say("The browser blocked the second window. Allow pop-ups for this page and try again.");
+    this.renderLinked();
+  }
+
+  private async reopenLinked() {
+    const link = this.rec?.linked?.[0];
+    if (!link) return;
+    if (this.linkedFile && this.linkedFile.name === link.fileName) { this.openLinked(this.linkedFile); return; }
+    if (folder.folderReady()) {
+      const v = (await folder.listVideos()).find((x) => x.name === link.fileName);
+      if (v) { this.openLinked(await v.handle.getFile()); return; }
+    }
+    this.q<HTMLInputElement>("#link-input").click();
+  }
+
+  private async unlink() {
+    if (!this.rec) return;
+    this.linked.close();
+    delete this.rec.linked;
+    this.linkedFile = null;
+    await this.saveRec();
+    this.renderLinked();
+  }
+
+  private renderLinked() {
+    const box = this.q("#linked");
+    const link = this.rec?.linked?.[0];
+    const isFile = this.rec?.kind === "file";
+    this.q("#link-video").hidden = !isFile || !!link;
+    if (!link || !isFile) { box.innerHTML = ""; return; }
+    const s = link.offsetMs / 1000;
+    box.innerHTML = `Synchronised video: <strong>${esc(link.fileName)}</strong>, starting ${Math.abs(s).toFixed(1)} s ${s >= 0 ? "after" : "before"} this one
+      ${this.linked.open ? "" : `<button data-act="open-linked">Open</button>`} <button data-act="unlink">Remove</button>`;
   }
 
   private renderSegments() {
@@ -1238,7 +1341,7 @@ export class App {
           ${pct > 0 && this.rec!.kind === "file" ? `<button data-act="reanalyse" data-id="${s.id}" title="Discard this segment’s results and analyse it again with the current version">Re-analyse</button>` : ""}
           <button data-act="delete" data-id="${s.id}" aria-label="Remove segment">Remove</button>
         </div></li>`;
-    }).join("") : `<li class="muted">No segments yet. Add the part of the exam you want to look at.</li>`;
+    }).join("") : `<li class="muted">No segments yet. Add the part of the video you want to look at.</li>`;
     this.q("#coverage-summary").textContent = this.coverage.length
       ? `${fmtTime(totalLength(this.coverage), 0)} analysed${pendingTotal > 0 ? `, ${fmtTime(pendingTotal, 0)} waiting` : ""}` : "";
     this.q<HTMLButtonElement>("#scope-all").disabled = !this.scopeSeg;
@@ -1309,11 +1412,13 @@ export class App {
     this.q<HTMLInputElement>("#set-minframes").value = String(s.minFrames);
     this.q<HTMLInputElement>("#set-blink").value = String(s.blinkHoldMs);
     this.q<HTMLInputElement>("#set-blinkfilter").checked = s.blinkFilter;
+    this.q<HTMLInputElement>("#set-distance").checked = s.distanceCorrection;
     this.q<HTMLInputElement>("#set-blinkpct").value = String(s.blinkLidPct);
     this.q<HTMLInputElement>("#set-blinkmax").value = String(s.blinkMaxMs);
     this.q("#model-info").innerHTML = m ? `
       <dt>Eye scale, horizontal</dt><dd>${m.kH.toFixed(0)}°/unit, ${m.kHSource}${Number.isFinite(m.rH) ? `; r = ${Math.abs(m.rH).toFixed(2)}` : ""}</dd>
       <dt>Eye scale, vertical</dt><dd>${m.kV.toFixed(0)}°/unit, ${m.kVSource}${Number.isFinite(m.rV) ? `; r = ${Math.abs(m.rV).toFixed(2)}` : ""}</dd>
+      <dt>Distance from camera</dt><dd>${distanceText(m, this.rec.settings.distanceCorrection)}</dd>
       <dt>Blinks removed</dt><dd>${this.rec.settings.blinkFilter ? m.blinksRemoved.toLocaleString() : "off"}</dd>
       <dt>Head direction signs</dt><dd>${m.headSignNote}</dd>
       <dt>Screen centre</dt><dd>${m.screenH.toFixed(0)}° horizontal, ${m.screenV.toFixed(0)}° vertical from the camera</dd>
@@ -1345,6 +1450,13 @@ export class App {
 }
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
+
+function distanceText(m: { distMedian: number; distRange: [number, number]; distMissing: number; distanceCorrected: boolean }, on: boolean): string {
+  if (!Number.isFinite(m.distMedian)) return "not recorded (analysed by an earlier version; re-analyse to use it)";
+  const range = `${Math.round(m.distRange[0] * 100)}–${Math.round(m.distRange[1] * 100)}% of usual`;
+  const missing = m.distMissing > 0.01 ? `; ${Math.round(m.distMissing * 100)}% of frames were analysed by an earlier version and aren’t corrected` : "";
+  return `${range}${on ? ", corrected" : ", not corrected"}${on ? missing : ""}`;
+}
 
 function missingText(m: { noFace: number; eyesOut: number; eyesClosed: number; olderAnalysis: number }): string {
   const pc = (x: number) => `${x < 0.005 && x > 0 ? "<1" : Math.round(x * 100)}%`;
@@ -1426,6 +1538,7 @@ const TEMPLATE = `
 </header>
 <div id="export-menu" class="export-menu" hidden>
   <label class="check"><input type="checkbox" id="export-thumbs" checked> Include frame thumbnails</label>
+  <label class="check"><input type="checkbox" id="export-tltext" checked> Include event timeline text (item wording and saved responses)</label>
   <span class="muted small">16×12-pixel greyscale thumbnails of every analysed frame. They’re only needed to line up later screen captures with this analysis; leave them out for a smaller file with no image-derived data.</span>
   <button id="export-go" class="primary">Download</button> <button id="export-cancel">Cancel</button>
 </div>
@@ -1433,7 +1546,7 @@ const TEMPLATE = `
 <div id="busy" class="busy" hidden><span id="busy-label"></span><progress id="busy-bar" max="1" value="0"></progress><button id="stop-busy">Stop</button></div>
 
 <section id="empty" class="empty">
-  <h2>Open an exam recording to start</h2>
+  <h2>Open a video to start</h2>
   <p>Open a WebM video file, or capture the video from a player window if you can’t download it. Nothing leaves this computer: analysis runs in the browser and only measurements are saved, never video.</p>
   <p>Then add the segments you want to look at. Each segment is analysed once; overlapping segments reuse what’s already done.</p>
 </section>
@@ -1445,15 +1558,21 @@ const TEMPLATE = `
     <section class="video-col">
       <div id="video-wrap">
         <div class="video-box"><video id="video" playsinline></video><canvas id="eye-overlay" aria-hidden="true"></canvas><p id="video-placeholder" class="placeholder"></p>
-          <p id="capture-note" class="placeholder" hidden>Screen-capture recording: no video is kept. Clicking a time shows where to go in the exam player.</p></div>
+          <p id="capture-note" class="placeholder" hidden>Screen-capture recording: no video is kept. Clicking a time shows where to go in the player.</p></div>
         <div id="video-controls" class="row transport">
-          <button id="back-frame" aria-label="Back one frame">◀ frame</button>
+          <button data-jump="-10000" aria-label="Back 10 seconds">−10 s</button>
+          <button data-jump="-5000" aria-label="Back 5 seconds">−5 s</button>
+          <button id="back-frame" aria-label="Back one frame">−frame</button>
           <button id="play" class="primary">Play</button>
-          <button id="fwd-frame" aria-label="Forward one frame">frame ▶</button>
+          <button id="fwd-frame" aria-label="Forward one frame">+frame</button>
+          <button data-jump="5000" aria-label="Forward 5 seconds">+5 s</button>
+          <button data-jump="10000" aria-label="Forward 10 seconds">+10 s</button>
           <select id="rate" aria-label="Playback speed"><option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
           <button id="sound" aria-pressed="true">Sound on</button>
           <input id="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
         </div>
+        <div class="row linked"><button id="link-video">Add another synchronised video…</button><span id="linked"></span>
+          <input id="link-input" type="file" accept="video/*,.webm,.mkv,.mp4,.mov" hidden></div>
         <div class="row">
           <label class="check"><input type="checkbox" id="live-on"> Track gaze live during playback</label>
           <label class="check"><input type="checkbox" id="show-eyes"> Show tracked eyes on the video</label>
@@ -1466,7 +1585,7 @@ const TEMPLATE = `
       <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they’re looking · Esc clear highlights</p>
     </section>
     <section class="plane-col">
-      <canvas id="plane" aria-label="Where the student is looking, seen from the camera"></canvas>
+      <canvas id="plane" aria-label="Where the person is looking, seen from the camera"></canvas>
       <div class="row plane-tools">
         <span>On the plane:</span>
         <label class="check"><input type="radio" name="dragmode" value="highlight" checked> drag to highlight those times</label>
@@ -1518,6 +1637,7 @@ const TEMPLATE = `
         <label>Eye scale, vertical <input id="set-kv" size="5" inputmode="decimal"> °/unit</label>
         <label>Follow posture drift over <input id="set-drift" size="4" inputmode="numeric"> s (0 = off)</label>
         <label>Shortest glance listed <input id="set-minframes" size="3" inputmode="numeric"> frames</label>
+        <label class="check"><input type="checkbox" id="set-distance"> Correct for leaning towards or away from the camera</label>
         <label class="check"><input type="checkbox" id="set-blinkfilter"> Remove blinks from the eye trace</label>
         <label>A blink is the lids below <input id="set-blinkpct" size="3" inputmode="numeric"> % of usual for at most <input id="set-blinkmax" size="4" inputmode="numeric"> ms</label>
         <label>Hold the last eye position when the eyes can’t be measured, up to <input id="set-blink" size="4" inputmode="numeric"> ms</label>
@@ -1525,5 +1645,10 @@ const TEMPLATE = `
       <dl id="model-info" class="model-info"></dl>
     </section>
   </div>
+
+  <section class="panel wide" id="tl-panel">
+    <h3>Event timeline <span id="tl-summary" class="muted small"></span></h3>
+    <div id="tl-body"></div>
+  </section>
 </main>
 `;

@@ -6,9 +6,9 @@ import type { Recording, Run, RecordingSettings } from "../store/types";
  *   gazeH = sH·headH + kH·eyeH        gazeV = sV·headV + kV·eyeV
  *
  * Display convention: (0,0) is the camera; h positive is towards the image right (the
- * student's left); v positive is up. sH and sV fix the tracker's head-angle signs from the
+ * person's left); v positive is up. sH and sV fix the tracker's head-angle signs from the
  * geometric nose position. k converts the eye measure to degrees. It is fitted from the
- * student's own fixations on the screen, where head movements are offset by opposite eye
+ * person's own fixations on the screen, where head movements are offset by opposite eye
  * movements (H + k·E ≈ constant), falling back to a prior. The same idea is used for
  * eye-contact mode in UC_TFR (EyeContactModel.ts, "fitted from postures").
  */
@@ -23,7 +23,7 @@ export interface GazeSeries {
   breakBefore: Uint8Array;
   /** 1 = frame classed as on-screen by the cluster model. */
   onScreen: Uint8Array;
-  /** Lid opening relative to this student's median (1 = typical; NaN = unknown). */
+  /** Lid opening relative to this person's median (1 = typical; NaN = unknown). */
   lid: Float32Array;
   /** 1 = a blink was removed here (eye movement replaced by interpolation). */
   blink: Uint8Array;
@@ -46,18 +46,24 @@ export interface GazeModelInfo {
   screenFraction: number;
   frameIntervalMs: number;
   validFraction: number;
-  /** The student's median lid opening (lid gap / eye width), for live blink detection. */
+  /** The person's median lid opening (lid gap / eye width), for live blink detection. */
   lidMedian: number;
   blinksRemoved: number;
   /** Why frames have no gaze, as fractions of all analysed frames. */
   missing: { noFace: number; eyesOut: number; eyesClosed: number; olderAnalysis: number };
   /** Fraction of frames brightened before tracking. */
   brightened: number;
+  /** Median face-to-camera distance (relative units), and the range of distance ratios seen (5th–95th percentile). */
+  distMedian: number;
+  distRange: [number, number];
+  /** Fraction of frames with gaze but no distance (analysed before distances were recorded). */
+  distMissing: number;
+  distanceCorrected: boolean;
 }
 
 /** Prior degrees per unit of eye measure, with the sign for the display convention. */
 export const PRIORS = {
-  // Blendshape gaze: positive H = towards the student's right (image left); positive V = up.
+  // Blendshape gaze: positive H = towards the person's right (image left); positive V = up.
   blend: { kH: -40, kV: 40 },
   // Iris: H increases towards image right; V ("across") increases downwards.
   iris: { kH: 140, kV: -140 },
@@ -74,7 +80,7 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
   const n = refs.length;
   const t = new Float64Array(n), headH = new Float32Array(n), headV = new Float32Array(n);
   const noseX = new Float32Array(n), noseY = new Float32Array(n), eH = new Float32Array(n), eV = new Float32Array(n);
-  const valid = new Uint8Array(n), breakBefore = new Uint8Array(n), lid = new Float32Array(n);
+  const valid = new Uint8Array(n), breakBefore = new Uint8Array(n), lid = new Float32Array(n), dist = new Float32Array(n);
   const gapMs = Math.max(150, rec.frameIntervalMs * 4);
 
   let lastEyeT = -Infinity, lastH = NaN, lastV = NaN;
@@ -101,6 +107,7 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
     if (Number.isFinite(h) && Number.isFinite(v)) { lastEyeT = t[i]; lastH = h; lastV = v; }
     else if (t[i] - lastEyeT <= s.blinkHoldMs) { h = lastH; v = lastV; }
     eH[i] = h; eV[i] = v;
+    dist[i] = valid[i] ? c.dist[j] : NaN;
   }
 
   const lids: number[] = [];
@@ -125,7 +132,26 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
   for (let k = 0; k < n; k++) ok[k] = valid[k] && Number.isFinite(H[k]) && Number.isFinite(V[k]) && Number.isFinite(eH[k]) && Number.isFinite(eV[k]) ? 1 : 0;
 
   const gh = new Float32Array(n), gv = new Float32Array(n);
-  const project = () => { for (let k = 0; k < n; k++) { gh[k] = H[k] + kH * eH[k]; gv[k] = V[k] + kV * eV[k]; } };
+  // Distance: angles to things near the camera grow as the person leans in (a phone 20 cm to the side
+  // is 18° away at 60 cm but 39° at 25 cm). Rescaling each frame's angles to the person's usual
+  // distance keeps those things in the same place on the plane.
+  const dists: number[] = [];
+  for (let k = 0; k < n; k += 2) if (Number.isFinite(dist[k])) dists.push(dist[k]);
+  const distMed = dists.length >= 20 ? median(dists) : NaN;
+  const useDist = s.distanceCorrection && Number.isFinite(distMed);
+  const ratios = Number.isFinite(distMed) ? dists.map((d) => d / distMed).sort((a, b) => a - b) : [];
+  const pq = (p: number) => ratios.length ? ratios[Math.min(ratios.length - 1, Math.floor(p * ratios.length))] : NaN;
+  let nNoDist = 0, nGaze = 0;
+  for (let k = 0; k < n; k++) if (valid[k]) { nGaze++; if (!Number.isFinite(dist[k])) nNoDist++; }
+  const project = () => {
+    for (let k = 0; k < n; k++) {
+      gh[k] = H[k] + kH * eH[k]; gv[k] = V[k] + kV * eV[k];
+      if (useDist && Number.isFinite(dist[k])) {
+        const r = dist[k] / distMed;
+        gh[k] = rescaleAngle(gh[k], r); gv[k] = rescaleAngle(gv[k], r);
+      }
+    }
+  };
   project();
   let centre = densestPoint(gh, gv, ok);
   let member = membership(gh, gv, ok, centre, SCREEN_RADIUS);
@@ -173,6 +199,10 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
         eyesClosed: Math.max(0, (n - nOk - nNoFace - nEyesOut - nOlder) / n),
       } : { noFace: 0, eyesOut: 0, eyesClosed: 0, olderAnalysis: 0 },
       brightened: n ? nBright / n : 0,
+      distMedian: distMed,
+      distRange: [pq(0.05), pq(0.95)],
+      distMissing: nGaze ? nNoDist / nGaze : 0,
+      distanceCorrected: useDist,
     },
   };
 }
@@ -211,6 +241,17 @@ export function removeBlinks(t: Float64Array, eH: Float32Array, eV: Float32Array
     k = e + 1;
   }
   return count;
+}
+
+/**
+ * The angle at which the same target would be seen from the usual distance: a target at angle a
+ * from distance d is tan(a)·d off the line of sight; from the usual distance D that is
+ * atan(tan(a)·d/D). Assumes targets lie roughly in a plane through the camera facing the person
+ * (laptop screen, a phone or notes beside it). Angles beyond ±85° are left alone.
+ */
+export function rescaleAngle(deg: number, ratio: number): number {
+  if (!Number.isFinite(deg) || Math.abs(deg) > 85) return deg;
+  return Math.atan(Math.tan((deg * Math.PI) / 180) * ratio) * 180 / Math.PI;
 }
 
 export function avg(a: number, b: number): number {

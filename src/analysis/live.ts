@@ -1,5 +1,5 @@
 import type { FrameValues } from "./frame";
-import { avg, indexAt, PRIORS, type GazeSeries } from "./gazeModel";
+import { avg, indexAt, PRIORS, rescaleAngle, type GazeSeries } from "./gazeModel";
 import type { RecordingSettings } from "../store/types";
 
 export interface LivePoint { t: number; h: number; v: number }
@@ -36,6 +36,10 @@ export class LiveGaze {
     let h = (m?.headSignH ?? 1) * values.headH + kH * eh;
     let v = (m?.headSignV ?? 1) * values.headV + kV * ev;
     if (!Number.isFinite(h) || !Number.isFinite(v)) { this.last = null; return null; }
+    if (m?.distanceCorrected && Number.isFinite(values.dist)) {
+      const r = values.dist / m.distMedian;
+      h = rescaleAngle(h, r); v = rescaleAngle(v, r);
+    }
     if (g && g.n) {
       const i = Math.max(0, indexAt(g.t, t));
       const j = Math.min(g.n - 1, i + 1);

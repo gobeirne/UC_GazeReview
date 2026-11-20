@@ -34,7 +34,7 @@ export interface PlaneState {
 type Grab = "move" | "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 const CURSORS: Record<Grab, string> = { move: "move", n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
 
-/** Camera-centred azimuth/elevation plane. h positive = image right (student's left), v positive = up. */
+/** Camera-centred azimuth/elevation plane. h positive = image right (the person's left), v positive = up. */
 export class GazePlane {
   view = { h0: -60, h1: 60, v0: -50, v1: 30 };
   private heat: { key: string; cells: Float32Array; max: number } | null = null;
@@ -209,8 +209,8 @@ export class GazePlane {
       if (a !== V.v0 && a !== V.v1) { ctx.textAlign = "left"; ctx.fillText(`${a}°`, X(V.h0) + 4, Y(a) - 3); }
     }
     ctx.font = "12px system-ui, sans-serif";
-    ctx.textAlign = "left"; ctx.fillText("Student’s right", X(V.h0) + 6, Y(V.v1) + 16);
-    ctx.textAlign = "right"; ctx.fillText("Student’s left", X(V.h1) - 6, Y(V.v1) + 16);
+    ctx.textAlign = "left"; ctx.fillText("Their right", X(V.h0) + 6, Y(V.v1) + 16);
+    ctx.textAlign = "right"; ctx.fillText("Their left", X(V.h1) - 6, Y(V.v1) + 16);
     if (st.heatHint) { ctx.textAlign = "center"; ctx.fillStyle = ink; ctx.fillText(st.heatHint, (X(V.h0) + X(V.h1)) / 2, Y(V.v1) + 16); ctx.fillStyle = muted; }
 
     const g = st.gaze;

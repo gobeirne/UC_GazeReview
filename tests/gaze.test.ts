@@ -13,9 +13,9 @@ const rec: Recording = {
 };
 
 /**
- * Simulated student: head wanders slowly; while reading the screen (centre 0°, −15°) the eyes
+ * Simulated person: head wanders slowly; while reading the screen (centre 0°, −15°) the eyes
  * offset the head (true eye scale −40°/unit, blendshape convention). Phone glances go to
- * (−40°, −5°) — the student's right — for `glanceFrames` frames.
+ * (−40°, −5°) — their right — for `glanceFrames` frames.
  */
 function simulate(opts: { glances: number[]; glanceFrames: number; headSignFlip?: boolean }) {
   const r = rng(7);
@@ -59,7 +59,7 @@ describe("gaze model", () => {
     expect(g.model.headSignV).toBe(-1);
     expect(g.model.kHSource).toMatch(/fitted/);
   });
-  test("lists brief glances as events, and they land on the student's right", () => {
+  test("lists brief glances as events, and they land on the person's right", () => {
     const g = buildGaze([simulate({ glances, glanceFrames: 4 })], rec);
     const lab = classify(g, []);
     const ev = findEvents(g, lab, 2);
@@ -80,5 +80,43 @@ describe("gaze model", () => {
     const ev = findEvents(g, classify(g, regions), 2);
     expect(ev.length).toBe(12);
     expect(ev.every((e) => e.region === 1)).toBe(true);
+  });
+});
+
+describe("distance correction", () => {
+  test("rescales angles to the usual distance", async () => {
+    const { rescaleAngle } = await import("../src/analysis/gazeModel");
+    // A phone 20 cm to the side: 18.4° from 60 cm, 38.7° from 25 cm. Seen from 25 cm and rescaled to 60 cm: 18.4°.
+    const at25 = Math.atan(20 / 25) * 180 / Math.PI;
+    expect(rescaleAngle(at25, 25 / 60)).toBeCloseTo(Math.atan(20 / 60) * 180 / Math.PI, 5);
+    expect(rescaleAngle(-at25, 25 / 60)).toBeCloseTo(-Math.atan(20 / 60) * 180 / Math.PI, 5);
+  });
+  test("glances to the same place stay together when the person leans in", () => {
+    const run = simulate({ glances: Array.from({ length: 12 }, (_, k) => 600 + k * 650), glanceFrames: 6 });
+    // Leaning in for the second half: distance 60 → 30, so the phone's angle widens; feed the wider angles.
+    const n = run.t.length;
+    for (let i = 0; i < n; i++) {
+      const close = i > n / 2;
+      run.cols.dist[i] = close ? 30 : 60;
+      if (close) {
+        // Re-derive eye values so total gaze matches the wider angle seen from 30 cm.
+        const headH = run.cols.headH[i], eH = run.cols.bHL[i];
+        const g = headH + -40 * eH;
+        const wide = Math.atan(Math.tan(g * Math.PI / 180) * 2) * 180 / Math.PI;
+        const eNew = (wide - headH) / -40;
+        run.cols.bHL[i] = eNew; run.cols.bHR[i] = eNew;
+      }
+    }
+    const recFixed = { ...rec, settings: { ...rec.settings, kH: -40, kV: 40 } };
+    const g = buildGaze([run], recFixed);
+    expect(g.model.distanceCorrected).toBe(true);
+    const ev = findEvents(g, classify(g, []), 2);
+    const firstHalf = ev.filter((e) => e.start < (n / 2) * 33.3).map((e) => e.peakH);
+    const secondHalf = ev.filter((e) => e.start >= (n / 2) * 33.3).map((e) => e.peakH);
+    const mean = (a: number[]) => a.reduce((s, x) => s + x, 0) / a.length;
+    expect(Math.abs(mean(firstHalf) - mean(secondHalf))).toBeLessThan(4);
+    const off = buildGaze([run], { ...recFixed, settings: { ...recFixed.settings, distanceCorrection: false } });
+    const ev2 = findEvents(off, classify(off, []), 2);
+    expect(Math.abs(mean(ev2.filter((e) => e.start >= (n / 2) * 33.3).map((e) => e.peakH)) - mean(ev2.filter((e) => e.start < (n / 2) * 33.3).map((e) => e.peakH)))).toBeGreaterThan(15);
   });
 });

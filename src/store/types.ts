@@ -15,6 +15,7 @@ export const FIELDS = [
   "jaw",                     // jawOpen blendshape 0..1 (mouth movement, for telling speaking from quiet)
   "why",                     // 0 = face used; 1 = no face found; 2 = face found but eyes out of frame
   "gain",                    // brightening applied to the frame before tracking (1 = none)
+  "dist",                    // face-to-camera distance from the head-pose model (relative units; only ratios are used)
 ] as const;
 export type Field = (typeof FIELDS)[number];
 
@@ -53,7 +54,7 @@ export interface Region {
   name: string;
   colour: string;
   isScreen: boolean;
-  /** Rectangle in display coordinates: h positive = towards the student's left (image right), v positive = up. Degrees. */
+  /** Rectangle in display coordinates: h positive = towards the person's left (image right), v positive = up. Degrees. */
   h0: number; h1: number; v0: number; v1: number;
   /** Placed automatically from the on-screen cluster; refitted as more is analysed until the reviewer edits it. */
   auto?: boolean;
@@ -72,10 +73,12 @@ export interface RecordingSettings {
   blinkHoldMs: number;
   /** Replace the eye movement during blinks with a straight line from before to after. */
   blinkFilter: boolean;
-  /** Lids below this percentage of the student's usual opening count as closing. */
+  /** Lids below this percentage of the person's usual opening count as closing. */
   blinkLidPct: number;
   /** Lid dips longer than this (ms) are kept: they are looks down, not blinks. */
   blinkMaxMs: number;
+  /** Rescale gaze angles to the person's usual distance from the camera. */
+  distanceCorrection: boolean;
 }
 
 export const DEFAULT_SETTINGS: RecordingSettings = {
@@ -88,7 +91,26 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   blinkFilter: true,
   blinkLidPct: 70,
   blinkMaxMs: 400,
+  distanceCorrection: true,
 };
+
+/** How video time relates to the clock times of an event timeline. */
+export interface SyncInfo {
+  /** Wall-clock time at the start of the video (YYYY-MM-DDTHH:mm:ss, no zone), or null if not set. */
+  startClock: string | null;
+  /** How it was set, e.g. "typed", "lined up with an event", "file date". */
+  method: string;
+  note: string;
+}
+
+/** A second video shown in its own window, kept in step with the main one. */
+export interface LinkedVideo {
+  fileName: string;
+  fileSize: number;
+  /** How much later than the main video it started (ms); its time = main time − offset. */
+  offsetMs: number;
+  offsetSource: string;
+}
 
 export interface Recording {
   id: string;
@@ -103,6 +125,12 @@ export interface Recording {
   segments: Segment[];
   regions: Region[];
   settings: RecordingSettings;
+  /** Imported event timeline (e.g. saved responses), kept verbatim. */
+  timeline?: import("../timeline/eventTimeline").StoredTimeline;
+  sync?: SyncInfo;
+  linked?: LinkedVideo[];
+  /** The video file's own date header (ms UTC), if it had one. */
+  fileDateUtcMs?: number;
   createdAt: number;
   updatedAt: number;
 }
