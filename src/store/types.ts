@@ -79,6 +79,8 @@ export interface RecordingSettings {
   blinkMaxMs: number;
   /** Rescale gaze angles to the person's usual distance from the camera. */
   distanceCorrection: boolean;
+  /** Looks shorter than this (ms) are left out of the event-timeline analysis. */
+  minLookMs: number;
 }
 
 export const DEFAULT_SETTINGS: RecordingSettings = {
@@ -92,6 +94,7 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   blinkLidPct: 70,
   blinkMaxMs: 400,
   distanceCorrection: true,
+  minLookMs: 0,
 };
 
 /** How video time relates to the clock times of an event timeline. */

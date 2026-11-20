@@ -78,7 +78,10 @@ function drawPanelA(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
       ctx.fillText(d.rowLabels[i] + (d.rowChanged[i] ? " *" : ""), L - 8, ym + 4);
     }
     ctx.fillStyle = C.tick;
-    for (const t of row) ctx.fillRect(X(t) - 1.5, y0 + rowH * 0.15, 3, Math.max(2, rowH * 0.7));
+    for (const [t, dur] of row) {
+      const x0 = X(t), x1 = Math.min(X(AFTER), X(t + dur));
+      ctx.fillRect(x0 - 1, y0 + rowH * 0.15, Math.max(3, x1 - x0 + 1), Math.max(2, rowH * 0.7));
+    }
   });
   ctx.strokeStyle = C.ink; ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(X(0), rasterTop); ctx.lineTo(X(0), histBottom); ctx.stroke(); ctx.setLineDash([]);

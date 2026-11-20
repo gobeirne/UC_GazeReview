@@ -160,6 +160,10 @@ export class TimelinePanel {
     }
     if (t.id === "tl-order") this.dateOrder = t.value as "dmy" | "mdy";
     if (t.id === "tl-region") { this.region = t.value; this.renderAnalysis(); }
+    if (t.id === "tl-minlook") {
+      const rec = this.host.rec();
+      if (rec) { rec.settings.minLookMs = Number(t.value); await this.host.save(); this.renderAnalysis(); this.host.redraw(); }
+    }
   }
 
   // ---------- Exports ----------
@@ -171,10 +175,11 @@ export class TimelinePanel {
     if (!regions.some((r) => r.isScreen)) { this.host.say("No region is marked as the screen, so looks can’t be counted properly. Tick “Screen” for the screen region in the Regions panel, then export again."); return null; }
     const evs = rec.timeline.data.events;
     const times = evs.map((e) => this.videoTime(e));
-    const looks = glances.filter((g) => this.region === "any" || String(g.region) === this.region).map((g) => g.start);
-    const peri = periEvent(times, looks, coverage, rec.frameIntervalMs);
+    const sel = this.selectedLooks(glances, rec.settings.minLookMs);
+    const peri = periEvent(times, sel.map((g) => g.start), coverage, rec.frameIntervalMs, sel.map((g) => g.end - g.start));
     if (!peri.events) { this.host.say("No saved responses have the minute before them analysed yet, so there’s nothing to report."); return null; }
-    const target = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
+    const where = this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
+    const target = rec.settings.minLookMs ? `${where} (looks of ${rec.settings.minLookMs / 1000} s or longer)` : where;
     const d = dwell(gaze, labels, -Infinity, Infinity);
     const ok = (() => { let n = 0; for (let k = 0; k < gaze.n; k++) n += gaze.ok[k]; return n; })();
     const named = regions.map((r, i) => ({ r, i })).filter(({ r }) => !r.isScreen);
@@ -185,7 +190,7 @@ export class TimelinePanel {
       const lastLook: Record<string, number | null> = {};
       for (const { r, i: ri } of named) {
         let best: number | null = null;
-        for (const g of glances) if (g.region === ri && g.start <= t && g.start >= t - BEFORE) best = best === null ? t - g.start : Math.min(best, t - g.start);
+        for (const g of glances) if (g.region === ri && g.end - g.start >= rec.settings.minLookMs && g.start <= t && g.start >= t - BEFORE) best = best === null ? t - g.start : Math.min(best, t - g.start);
         lastLook[r.name] = best;
       }
       const change = e.change_type === "revision" ? `${prev ? answerLabel(prev, 20) : "?"} → ${answerLabel(e, 20)}` : e.change_type === "resave" ? "same again" : "first";
@@ -224,6 +229,11 @@ export class TimelinePanel {
     if (kind === "export-figure") (d as unknown as { _canvas: HTMLCanvasElement })._canvas.toBlob((b) => b && downloadBlob(`${base}-looks-around-responses.png`, b), "image/png");
     if (kind === "export-report") download(`${base}-gaze-report.html`, buildReportHtml(d), "text/html");
     if (kind === "export-csv") download(`${base}-responses.csv`, buildCsv(d), "text/csv");
+  }
+
+  /** Looks to the chosen region (or anywhere off screen) lasting at least minMs. */
+  private selectedLooks(glances: GazeEvent[], minMs: number): GazeEvent[] {
+    return glances.filter((g) => (this.region === "any" || String(g.region) === this.region) && g.end - g.start >= minMs);
   }
 
   select(i: number) {
@@ -288,7 +298,8 @@ export class TimelinePanel {
       </div>
       <div class="tl-analysis" ${synced ? "" : "hidden"}>
         <h4>Looks away around events</h4>
-        <div class="row small"><label>Count looks to <select id="tl-region"></select></label></div>
+        <div class="row small"><label>Count looks to <select id="tl-region"></select></label>
+          <label>lasting at least <select id="tl-minlook">${[[0, "any length"], [100, "0.1 s"], [200, "0.2 s"], [300, "0.3 s"], [500, "0.5 s"], [1000, "1 s"]].map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></label></div>
         <canvas id="tl-hist" aria-label="Looks away before and after events"></canvas>
         <p id="tl-hist-note" class="small"></p>
         <div class="row">
@@ -314,7 +325,10 @@ export class TimelinePanel {
       sel.value = [...sel.options].some((o) => o.value === this.region) ? this.region : "any";
       this.region = sel.value;
     }
-    const looks = glances.filter((g) => this.region === "any" || String(g.region) === this.region).map((g) => g.start).sort((a, b) => a - b);
+    const minLook = rec.settings.minLookMs;
+    const chosen = this.selectedLooks(glances, minLook);
+    const minSel = this.box.querySelector<HTMLSelectElement>("#tl-minlook");
+    if (minSel) minSel.value = String(minLook);
     const synced = this.synced();
     const evs = rec.timeline.data.events;
     const dt = rec.frameIntervalMs;
@@ -326,7 +340,7 @@ export class TimelinePanel {
       let lastLook = "";
       if (synced && gaze && contains(coverage, t)) {
         let best = -1;
-        for (const g of glances) if (g.start <= t && g.start >= t - BEFORE && (this.region === "any" || String(g.region) === this.region)) best = Math.max(best, g.start);
+        for (const g of chosen) if (g.start <= t && g.start >= t - BEFORE) best = Math.max(best, g.start);
         if (best >= 0) {
           const g = glances.find((x) => x.start === best)!;
           lastLook = `−${((t - best) / 1000).toFixed(1)} s${g.region >= 0 ? `, ${esc(regions[g.region]?.name ?? "")}` : ""}`;
@@ -349,7 +363,7 @@ export class TimelinePanel {
       if (note) note.innerHTML = `<span class="warn-line">No region is marked as the screen, so looks can’t be counted. Tick “Screen” for the screen region in the Regions panel.</span>`;
       return;
     }
-    this.drawHist(periEvent(evs.map((e) => this.videoTime(e)), looks, coverage, dt));
+    this.drawHist(periEvent(evs.map((e) => this.videoTime(e)), chosen.map((g) => g.start), coverage, dt, chosen.map((g) => g.end - g.start)));
   }
 
   private drawHist(h: PeriResult | null) {

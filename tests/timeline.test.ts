@@ -71,7 +71,7 @@ describe("event-based test", () => {
     expect(r.p).toBeLessThan(0.01);
     expect(r.latencies.every((x) => x === 4000)).toBe(true);
     expect(r.raster.length).toBe(35);
-    expect(r.raster[0]).toEqual([-6000, -5000, -4000]);
+    expect(r.raster[0]).toEqual([[-6000, 0], [-5000, 0], [-4000, 0]]);
   });
   test("no relation gives an unremarkable p", async () => {
     const { periEvent: pe } = await import("../src/analysis/periEvent");
@@ -79,5 +79,13 @@ describe("event-based test", () => {
     const events = Array.from({ length: 35 }, (_, i) => 120_000 + i * 95_000);
     const looks = Array.from({ length: 60 }, (_, i) => 70_000 + i * 58_731);
     expect(pe(events, looks, coverage, 33).p).toBeGreaterThan(0.05);
+  });
+});
+
+describe("look durations", () => {
+  test("the raster keeps each look's length", async () => {
+    const { periEvent: pe } = await import("../src/analysis/periEvent");
+    const r = pe([100_000], [95_000, 97_000], [{ start: 0, end: 200_000 }], 33, [1200, 66]);
+    expect(r.raster[0]).toEqual([[-5000, 1200], [-3000, 66]]);
   });
 });

@@ -15,8 +15,8 @@ export interface PeriResult {
   eventsWithLook: number; eventsWithLookMean: number; eventsWithLookHi: number;
   /** Share of shuffles with at least as many events with a look: (k + 1) / (SHUFFLES + 1). */
   p: number; shufflesAtLeast: number;
-  /** Per counted event: look onsets relative to it (ms, within the window). */
-  raster: number[][];
+  /** Per counted event: looks relative to it, as [onset, duration] (ms; onset within the window). */
+  raster: [number, number][][];
   /** For events with a look just before: time from the last look's start to the event (ms). */
   latencies: number[];
 }
@@ -31,24 +31,26 @@ export interface PeriResult {
  * which widens the chance range. Counting events with at least one look in the 10 s before is
  * unaffected by bursts, and is the main test.
  */
-export function periEvent(eventTimes: number[], looks: number[], coverage: Interval[], frameMs: number): PeriResult {
+export function periEvent(eventTimes: number[], looks: number[], coverage: Interval[], frameMs: number, durations?: number[]): PeriResult {
   const nb = (BEFORE + AFTER) / BIN;
   const jb0 = (BEFORE - JUST_BEFORE) / BIN, jb1 = BEFORE / BIN; // bins covering the 10 s before
   const inside = (t: number) => coverage.some((c) => t - BEFORE >= c.start - frameMs && t + AFTER <= c.end + frameMs);
   const used = eventTimes.map((t, i) => ({ t, i })).filter((x) => Number.isFinite(x.t) && inside(x.t));
-  const sorted = looks.slice().sort((a, b) => a - b);
+  const order = looks.map((_, i) => i).sort((a, b) => looks[a] - looks[b]);
+  const sorted = order.map((i) => looks[i]);
+  const durs = order.map((i) => durations?.[i] ?? 0);
   const lowerBound = (x: number) => { let lo = 0, hi = sorted.length; while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] < x) lo = m + 1; else hi = m; } return lo; };
   const measure = (times: number[], keepRaster: boolean) => {
     const h = new Array(nb).fill(0);
     let hits = 0;
-    const raster: number[][] = [], latencies: number[] = [];
+    const raster: [number, number][][] = [], latencies: number[] = [];
     for (const t of times) {
-      const row: number[] = [];
+      const row: [number, number][] = [];
       let lastBefore = -Infinity;
       for (let k = lowerBound(t - BEFORE); k < sorted.length && sorted[k] < t + AFTER; k++) {
         const d = sorted[k] - t;
         h[Math.floor((d + BEFORE) / BIN)]++;
-        if (keepRaster) row.push(d);
+        if (keepRaster) row.push([d, durs[k]]);
         if (d >= -JUST_BEFORE && d < 0) lastBefore = Math.max(lastBefore, d);
       }
       if (lastBefore > -Infinity) { hits++; latencies.push(-lastBefore); }

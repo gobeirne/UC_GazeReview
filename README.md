@@ -115,6 +115,8 @@ The *Event timeline* panel attaches timestamped events to the recording and show
 
 The panel's main result counts **events**, not looks: how many events had at least one look in the 10 s before, against the same count for randomly placed events, with a p value (the share of 500 random placements that did at least as well). Looks often come in bursts, so counting looks lets one event with several glances count several times, which widens the chance range; counting events avoids that. The look count is shown as well.
 
+*lasting at least* leaves out looks shorter than a chosen length (0.1–1 s), so brief crossings of a region's edge (a few frames, often noise near the screen's edge) can be separated from sustained looks. In the exported raster each look is drawn as a bar as long as the look, so the two kinds can be told apart by eye. Choose the length for a reason other than the result (for example, from how long the looks you can see in the video last), or the p value loses its meaning.
+
 **Exports** (below the histogram), for the region chosen in *Count looks to*:
 
 - *Export figure (PNG)*: a print-resolution figure for email or documents. Panel A is a raster (one row per event, a tick for each look, aligned to the event) above the histogram with its chance band; panel B is the gaze plane with the labelled regions and the share of time at each. The caption states the result.
