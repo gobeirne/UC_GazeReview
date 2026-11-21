@@ -49,3 +49,23 @@ describe("noise gate", () => {
     expect(opusDurationMs(0xfc, undefined)).toBe(20); // config 31, one frame
   });
 });
+
+describe("judging items", () => {
+  test("items without analysed gaze are not counted as having no look", async () => {
+    const { buildEpisodes, sequenceStats, itemsWithLooks } = await import("../src/analysis/sequence");
+    const its = [
+      { label: "Q1", changed: false, from: 0, save: 60_000 },
+      { label: "Q2", changed: false, from: 60_000, save: 120_000 },
+      { label: "Q3", changed: false, from: 120_000, save: 180_000 },
+    ];
+    // Gaze analysed only from 60 s; Q2 has an automatic look; Q3 has none but the eyes were obscured.
+    const eps = buildEpisodes(its, [{ start: 110_000, end: 110_500 }], [], [{ start: 170_000, end: 172_000 }], [], [], "both", [{ start: 60_000, end: 200_000 }]);
+    expect(eps.map((e) => e.analysed)).toEqual([false, true, true]);
+    const s = sequenceStats(eps);
+    expect(s.judged).toBe(2);
+    expect(s.itemsWithLook).toBe(1);
+    expect(s.obscuredOnly).toBe(1);
+    expect(s.neither).toBe(0);
+    expect(itemsWithLooks(eps, [{ start: 30_000, end: 31_000 }, { start: 150_000, end: 151_000 }])).toBe(1);
+  });
+});

@@ -9,7 +9,7 @@ import { cssVar, download, downloadBlob, esc, fitCanvas, fmtTime } from "./util"
 import { classify, dwell, ELSEWHERE, findEvents, SCREEN } from "../analysis/events";
 import { totalLength } from "../analysis/intervals";
 import { drawFigure } from "../report/figure";
-import { buildEpisodes, sequenceStats, statsLines, type Anchor, type Episode, type LookFilter } from "../analysis/sequence";
+import { buildEpisodes, itemsWithLooks, sequenceStats, statsLines, type Anchor, type Episode, type LookFilter } from "../analysis/sequence";
 import { drawSequence } from "../report/sequenceFigure";
 import { buildCsv, buildReportHtml, figureCaption, type EventRow, type ReportData } from "../report/report";
 
@@ -338,7 +338,7 @@ export class TimelinePanel {
     const v = (id: string, d: string) => this.box.querySelector<HTMLSelectElement>(id)?.value ?? d;
     const rec = this.host.rec();
     const before = rec?.settings.seqBeforeMs ?? 30_000, after = rec?.settings.seqAfterMs ?? 15_000;
-    return { anchor: v("#seq-anchor", "submit") as Anchor, sort: v("#seq-sort", "item") as "item" | "delay", filter: v("#seq-looks", "both") as LookFilter, before, after };
+    return { anchor: v("#seq-anchor", "submit") as Anchor, sort: v("#seq-sort", "item") as "item" | "delay" | "exceptions", filter: v("#seq-looks", "both") as LookFilter, before, after };
   }
 
   /** Items with their speech, looks, obscured stretches and submit, by the fixed anchor rules. */
@@ -356,7 +356,7 @@ export class TimelinePanel {
       const its = g.members.map((k) => evs[k]);
       return { label: groupLabel(its), changed: its.some((e) => e.change_type === "revision"), from: i ? times[groups[i - 1].members[groups[i - 1].members.length - 1]] : span?.start ?? g.t - BEFORE, save: g.t };
     });
-    return buildEpisodes(items, auto, m.looks, m.obscured, m.speech, m.submits, filter);
+    return buildEpisodes(items, auto, m.looks, m.obscured, m.speech, m.submits, filter, this.host.analysis().coverage);
   }
 
   private seqHits: { y0: number; y1: number; e: Episode }[] = [];
@@ -371,10 +371,10 @@ export class TimelinePanel {
     const { w, h, ctx } = fitCanvas(cv);
     const target = this.targetName();
     this.seqHits = drawSequence(ctx, w, h, eps, { ...o, target });
-    const lines = statsLines(sequenceStats(eps), target);
+    const lines = statsLines(sequenceStats(eps), target, this.comparisons(eps));
     if (o.filter === "both") {
       const autoOnly = sequenceStats(this.episodes("auto"));
-      lines.push(`With automatic looks only: speech, look, submit in ${autoOnly.withSequence} of ${autoOnly.items}`);
+      lines.push(`With automatic looks only: a look to ${target} in ${autoOnly.itemsWithLook} of ${autoOnly.judged} judged items; speech, look, submit in ${autoOnly.withSequence}`);
     }
     list.innerHTML = lines.map((l) => `<li>${esc(l)}</li>`).join("");
     if (!cv.dataset.wired) {
@@ -390,6 +390,21 @@ export class TimelinePanel {
     }
   }
 
+  /** Items with a look to each other region, and anywhere else off the screen, for comparison. */
+  private comparisons(eps: Episode[]): { name: string; items: number }[] {
+    const rec = this.host.rec();
+    const { glances, regions } = this.host.analysis();
+    if (!rec || this.region === "any") return [];
+    const looks = this.looksFor(glances).filter((g) => g.end - g.start >= rec.settings.minLookMs && (!rec.settings.minRegionFrames || g.frames >= rec.settings.minRegionFrames));
+    const out: { name: string; items: number }[] = [];
+    regions.forEach((r, i) => {
+      if (r.isScreen || String(i) === this.region) return;
+      out.push({ name: r.name, items: itemsWithLooks(eps, looks.filter((g) => g.region === i)) });
+    });
+    out.push({ name: "anywhere else off the screen", items: itemsWithLooks(eps, looks.filter((g) => String(g.region) !== this.region)) });
+    return out;
+  }
+
   private targetName(): string {
     const { regions } = this.host.analysis();
     return this.region === "any" ? "anywhere off the screen" : regions[Number(this.region)]?.name ?? "the region";
@@ -402,8 +417,8 @@ export class TimelinePanel {
     const eps = this.episodes(o.filter);
     if (!eps.length) return this.host.say("There are no items to show yet.");
     const target = this.targetName();
-    const lines = statsLines(sequenceStats(eps), target);
-    if (o.filter === "both") { const a = sequenceStats(this.episodes("auto")); lines.push(`With automatic looks only: speech, look, submit in ${a.withSequence} of ${a.items}`); }
+    const lines = statsLines(sequenceStats(eps), target, this.comparisons(eps));
+    if (o.filter === "both") { const a = sequenceStats(this.episodes("auto")); lines.push(`With automatic looks only: a look to ${target} in ${a.itemsWithLook} of ${a.judged} judged items; speech, look, submit in ${a.withSequence}`); }
     const W = 1600, H = Math.max(700, eps.length * 22 + 360 + lines.length * 19);
     const cv = document.createElement("canvas");
     cv.width = W * 2; cv.height = H * 2;
@@ -525,7 +540,7 @@ export class TimelinePanel {
         <h4>Sequence per item</h4>
         <div class="row small">
           <label>Line up on <select id="seq-anchor"><option value="submit">submit</option><option value="glance">start of the look</option><option value="speech">end of speech</option></select></label>
-          <label>Order <select id="seq-sort"><option value="item">by item</option><option value="delay">by time from look to submit</option></select></label>
+          <label>Order <select id="seq-sort"><option value="item">by item</option><option value="delay">by time from look to submit</option><option value="exceptions">items without a look first</option></select></label>
           <label>Looks <select id="seq-looks"><option value="both">automatic and marked by hand</option><option value="auto">automatic only</option><option value="manual">marked by hand only</option></select></label>
           <label>Show <input id="seq-before" type="number" min="1" max="300" step="1" size="4" value="${Math.round((rec.settings.seqBeforeMs ?? 30_000) / 1000)}"> s before and
             <input id="seq-after" type="number" min="1" max="300" step="1" size="4" value="${Math.round((rec.settings.seqAfterMs ?? 15_000) / 1000)}"> s after</label>

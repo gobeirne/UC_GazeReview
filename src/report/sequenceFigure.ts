@@ -2,7 +2,7 @@ import { anchorTime, type Anchor, type Episode } from "../analysis/sequence";
 
 export interface SequenceDrawOptions {
   anchor: Anchor;
-  sort: "item" | "delay";
+  sort: "item" | "delay" | "exceptions";
   /** Window around the anchor (ms). */
   before: number;
   after: number;
@@ -21,8 +21,13 @@ const FONT = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
 const ANCHOR_NAME: Record<Anchor, string> = { speech: "end of speech", glance: "start of the look", submit: "submit" };
 
 /** Rows in display order: by item, or by the time from the look to submit (rows without a look last). */
-export function orderRows(eps: Episode[], sort: "item" | "delay"): Episode[] {
+export function orderRows(eps: Episode[], sort: "item" | "delay" | "exceptions"): Episode[] {
   if (sort === "item") return eps;
+  if (sort === "exceptions") {
+    // Items without a look first (those with eyes obscured next), then not judged, then the rest, in item order.
+    const rank = (e: Episode) => (!e.analysed && !e.looks.length ? 2 : !e.glance ? (e.obscured.length ? 1 : 0) : 3);
+    return eps.map((e, i) => ({ e, i })).sort((a, b) => rank(a.e) - rank(b.e) || a.i - b.i).map((x) => x.e);
+  }
   const d = (e: Episode) => (e.glance ? e.submit - e.glance.end : Infinity);
   return eps.slice().sort((a, b) => d(a) - d(b));
 }
@@ -92,9 +97,12 @@ export function drawSequence(ctx: CanvasRenderingContext2D, w: number, h: number
       ctx.fillStyle = e.changed ? "#bb6624" : C.muted;
       ctx.fillText(e.label + (e.changed ? " *" : ""), L - 8, ym + 4);
     }
-    if (anchorTime(e, o.anchor) === undefined) {
+    if (!e.analysed && !e.looks.length) {
       ctx.fillStyle = C.muted; font(Math.min(12, Math.max(9, rowH * 0.6)), 400); ctx.textAlign = "left";
-      ctx.fillText(o.anchor === "glance" ? "no look in this item" : o.anchor === "speech" ? "no speech before the look" : "", L + 8, ym + 4);
+      ctx.fillText("gaze not analysed for this item", L + 8, ym + 4);
+    } else if (anchorTime(e, o.anchor) === undefined) {
+      ctx.fillStyle = C.muted; font(Math.min(12, Math.max(9, rowH * 0.6)), 400); ctx.textAlign = "left";
+      ctx.fillText(o.anchor === "glance" ? (e.obscured.length ? "no look; eyes obscured" : "no look in this item") : o.anchor === "speech" ? "no speech before the look" : "", L + 8, ym + 4);
     }
   });
   // Legend.
