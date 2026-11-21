@@ -18,7 +18,7 @@ import { TimelinePanel } from "./timelinePanel";
 import { LinkedVideoWindow } from "./linkedVideo";
 import { audioEnvelope, defaultGate, gateSegments, levelStats } from "../audio/envelope";
 import type { Annotation, AnnotationKind } from "../store/types";
-import { download, esc, fmtTime, parseTime, REGION_COLOURS, SCREEN_COLOUR } from "./util";
+import { download, downloadBlob, esc, fmtTime, parseTime, REGION_COLOURS, SCREEN_COLOUR } from "./util";
 
 interface Busy { label: string; done: number; total: number; abort: AbortController }
 
@@ -67,6 +67,8 @@ export class App {
   private linkedFile: File | null = null;
   private linkedWasOpen = false;
   private marking: { kind: AnnotationKind; start: number } | null = null;
+  private traceItem = 0;
+  private traceTicked = new Set<number>();
   private linked = new LinkedVideoWindow();
   private liveFpr: Fingerprinter | null = null;
   private sidecarTimer = 0;
@@ -242,7 +244,29 @@ export class App {
     this.q("#detect-speech").addEventListener("click", () => this.detectSpeech());
     this.q("#gate").addEventListener("change", () => this.readGate());
     this.q("#gate-auto").addEventListener("change", () => this.readGate());
-    this.q<HTMLSelectElement>("#heat-scope").addEventListener("change", () => { this.plane.invalidateHeat(); this.drawCanvases(); });
+    this.q<HTMLSelectElement>("#heat-scope").addEventListener("change", () => { this.plane.invalidateHeat(); this.renderTraceControls(); this.drawCanvases(); });
+    this.q("#export-plane").addEventListener("click", () => this.exportPlane());
+    this.q("#trace-controls").addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>("[data-act]");
+      if (!b) return;
+      const items = this.timelinePanel.itemIntervals();
+      if (b.dataset.act === "trace-prev" || b.dataset.act === "trace-next") {
+        this.traceItem = Math.max(0, Math.min(items.length - 1, this.traceItem + (b.dataset.act === "trace-next" ? 1 : -1)));
+        this.renderTraceControls(); this.goToTraceItem();
+      }
+      if (b.dataset.act === "trace-label") this.labelFrame();
+      if (b.dataset.act === "trace-clear" && this.rec) {
+        const it = items[this.traceItem];
+        if (it) { this.rec.traceLabels = (this.rec.traceLabels ?? []).filter((l) => l.t < it.from || l.t > it.to); this.saveRec(); }
+      }
+      if (b.dataset.act === "tick-all") { items.forEach((_, i) => this.traceTicked.add(i)); this.renderTraceControls(); }
+      if (b.dataset.act === "tick-none") { this.traceTicked.clear(); this.renderTraceControls(); }
+    });
+    this.q("#trace-controls").addEventListener("change", (e) => {
+      const t = e.target as HTMLInputElement;
+      if (t.id === "trace-item") { this.traceItem = Number(t.value); this.goToTraceItem(); }
+      if (t.dataset.tick) { const i = Number(t.dataset.tick); if (t.checked) this.traceTicked.add(i); else this.traceTicked.delete(i); }
+    });
     this.q("#fit-plane").addEventListener("click", () => { this.plane.fitTo(this.gaze); this.drawCanvases(); });
     this.q("#clear-hl").addEventListener("click", () => { this.planeBrush = null; this.timeBrush = null; this.renderHeatScope(); this.drawCanvases(); });
 
@@ -301,6 +325,7 @@ export class App {
       else if (e.key === "o") this.toggleMark("obscured");
       else if (e.key === "s") this.toggleMark("speech");
       else if (e.key === "k") this.toggleMark("submit");
+      else if (e.key === "f") this.labelFrame();
     });
   }
 
@@ -967,6 +992,118 @@ export class App {
     this.renderCapturePanel();
   }
 
+  // ---------- Gaze traces by item ----------
+
+  private renderTraceControls() {
+    const box = this.q("#trace-controls");
+    const mode = this.q<HTMLSelectElement>("#heat-scope").value;
+    const items = this.timelinePanel.itemIntervals();
+    if ((mode !== "item" && mode !== "items") || !items.length) { box.hidden = true; box.innerHTML = ""; return; }
+    box.hidden = false;
+    this.traceItem = Math.min(this.traceItem, items.length - 1);
+    if (mode === "item") {
+      box.innerHTML = `<div class="row small">
+        <button data-act="trace-prev" aria-label="Previous item">◀</button>
+        <select id="trace-item">${items.map((it, i) => `<option value="${i}" ${i === this.traceItem ? "selected" : ""}>${esc(it.label)} (${fmtTime(it.from, 0)}–${fmtTime(it.to, 0)})</option>`).join("")}</select>
+        <button data-act="trace-next" aria-label="Next item">▶</button>
+        <button data-act="trace-label">Label this frame (F)</button>
+        <button data-act="trace-clear">Clear labels in this item</button>
+        <span class="muted">Grey: the whole item; red: the moment playing and its trail.</span></div>`;
+    } else {
+      box.innerHTML = `<div class="row small"><button data-act="tick-all">All</button><button data-act="tick-none">None</button>
+        <button data-act="trace-label">Label this frame (F)</button></div>
+        <div class="tick-grid">${items.map((it, i) => {
+          const k = [...this.traceTicked].filter((x) => items[x]).sort((a, b) => a - b).indexOf(i);
+          const n = [...this.traceTicked].filter((x) => items[x]).length;
+          return `<label class="check small"><input type="checkbox" data-tick="${i}" ${this.traceTicked.has(i) ? "checked" : ""}>
+            <span class="swatch" style="background:${k >= 0 ? traceColour(k, n) : "transparent"}"></span>${esc(it.label)}</label>`;
+        }).join("")}</div>`;
+      box.querySelectorAll<HTMLInputElement>("[data-tick]").forEach((cb) => cb.addEventListener("change", () => this.renderTraceControls()));
+    }
+  }
+
+  private goToTraceItem() {
+    const it = this.timelinePanel.itemIntervals()[this.traceItem];
+    if (it) { this.video.pause(); this.seek(it.from); }
+  }
+
+  /** Frame number of a video time: its position in the file's frame list (1-based), or an estimate. */
+  private frameNumber(t: number): number {
+    const fr = this.index?.frames;
+    if (fr?.length) {
+      let best = 0, bd = Infinity;
+      let lo = 0, hi = fr.length - 1;
+      while (lo <= hi) { const m = (lo + hi) >> 1; if (fr[m].t < t) lo = m + 1; else hi = m - 1; }
+      for (const k of [lo - 1, lo, lo + 1]) if (fr[k] && Math.abs(fr[k].t - t) < bd) { bd = Math.abs(fr[k].t - t); best = k; }
+      return best + 1;
+    }
+    return Math.round(t / (this.rec?.frameIntervalMs ?? 33.3)) + 1;
+  }
+
+  private labelFrame() {
+    if (!this.rec || !this.gaze) return;
+    const t = this.playhead();
+    const i = indexAt(this.gaze.t, t);
+    if (i < 0 || !this.gaze.ok[i] || Math.abs(this.gaze.t[i] - t) > 2 * this.rec.frameIntervalMs) return this.say("No gaze at this frame to label (not analysed, or no face found).");
+    (this.rec.traceLabels ??= []).push({ id: newId("lbl"), t: this.gaze.t[i] });
+    this.saveRec();
+    this.say(`Labelled frame ${this.frameNumber(this.gaze.t[i])} at ${fmtTime(this.gaze.t[i], 2)}.`);
+  }
+
+  private traceLabelPoints(items: { from: number; to: number }[]): { h: number; v: number; text: string }[] {
+    const g = this.gaze;
+    if (!g || !this.rec?.traceLabels) return [];
+    return this.rec.traceLabels.filter((l) => items.some((it) => l.t >= it.from && l.t <= it.to)).flatMap((l) => {
+      const i = indexAt(g.t, l.t);
+      return i >= 0 && g.ok[i] ? [{ h: g.h[i], v: g.v[i], text: `frame ${this.frameNumber(g.t[i])} · ${fmtTime(g.t[i], 2)}` }] : [];
+    });
+  }
+
+  /** The gaze plane as a PNG on a white background, with a title and (for several items) a key. No video frame is included. */
+  private exportPlane() {
+    if (!this.rec) return;
+    const hs = this.heatState();
+    const W = 1600, PH = Math.round(W * (this.plane.canvas.clientHeight / Math.max(1, this.plane.canvas.clientWidth)) || 1067);
+    const off = document.createElement("canvas");
+    const p2 = new GazePlane(off);
+    p2.view = { ...this.plane.view };
+    p2.draw({
+      gaze: this.gaze, scope: this.scope(), regions: this.rec.regions, playhead: this.playhead(),
+      timeBrush: null, planeBrush: null, draft: null, inset: null, insetAspect: 4 / 3,
+      ...hs, heatHint: "", trailMs: this.q<HTMLSelectElement>("#heat-scope").value === "items" ? 0 : 2000, live: null, editable: false, selectedRegion: null,
+    }, { size: { w: W, h: PH, scale: 2 }, palette: LIGHT });
+    const mode = this.q<HTMLSelectElement>("#heat-scope").value;
+    const items = this.timelinePanel.itemIntervals();
+    const ticked = [...this.traceTicked].filter((i) => items[i]).sort((a, b) => a - b);
+    const keyRows = mode === "items" ? Math.ceil(ticked.length / 8) : 0;
+    const head = 84, foot = 36 + keyRows * 26;
+    const out = document.createElement("canvas");
+    out.width = W * 2; out.height = (head + PH + foot) * 2;
+    const ctx = out.getContext("2d")!; ctx.scale(2, 2);
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, head + PH + foot);
+    ctx.fillStyle = "#17212b"; ctx.font = "650 24px system-ui, sans-serif"; ctx.textAlign = "left";
+    const it = items[this.traceItem];
+    const title = mode === "item" && it ? `Gaze trace, ${it.label}` : mode === "items" ? `Gaze traces, ${ticked.length} items` : "Where gaze went";
+    ctx.fillText(title, 24, 38);
+    ctx.fillStyle = "#5d6a75"; ctx.font = "15px system-ui, sans-serif";
+    const sub = mode === "item" && it ? `${this.rec.name} · ${fmtTime(it.from)}–${fmtTime(it.to)} · grey: the whole item; red: ${fmtTime(this.playhead())} and the 2 s before`
+      : hs.heatHint ? `${this.rec.name} · ${hs.heatHint}` : this.rec.name;
+    ctx.fillText(sub, 24, 64);
+    ctx.drawImage(off, 0, head, W, PH);
+    ctx.font = "14px system-ui, sans-serif";
+    if (mode === "items") {
+      ticked.forEach((i, k) => {
+        const x = 24 + (k % 8) * 196, y = head + PH + 22 + Math.floor(k / 8) * 26;
+        ctx.fillStyle = traceColour(k, ticked.length); ctx.fillRect(x, y - 10, 22, 4);
+        ctx.fillStyle = "#17212b"; ctx.fillText(items[i].label, x + 30, y - 4);
+      });
+    }
+    ctx.fillStyle = "#5d6a75"; ctx.font = "12px system-ui, sans-serif";
+    ctx.fillText("Degrees from the camera, as seen from the camera. Their right is on the left.", 24, head + PH + foot - 10);
+    const name = mode === "item" && it ? `-trace-${it.label}` : mode === "items" ? "-traces" : "-plane";
+    out.toBlob((b) => b && downloadBlob(`${this.rec!.name.replace(/[^\w.-]+/g, "_")}${name.replace(/[^\w.-]+/g, "_")}.png`, b), "image/png");
+  }
+
   // ---------- Marks made while watching ----------
 
   /** Starts or ends a mark of this kind at the playhead (submit marks are instants). */
@@ -1337,9 +1474,21 @@ export class App {
   }
 
   /** Which frames the heatmap counts: the segment (or all), the highlighted stretch only, or none. */
-  private heatState(): { showHeat: boolean; heatScope: Interval | Interval[] | null; heatHint: string; dots?: { h: number; v: number; hot: boolean }[] | null } {
+  private heatState(): { showHeat: boolean; heatScope: Interval | Interval[] | null; heatHint: string; dots?: { h: number; v: number; hot: boolean }[] | null;
+    traces?: { from: number; to: number; colour: string; width?: number }[]; traceLabels?: { h: number; v: number; text: string }[]; trailColour?: string } {
     const mode = this.q<HTMLSelectElement>("#heat-scope").value;
     if (mode === "off") return { showHeat: false, heatScope: null, heatHint: "" };
+    if (mode === "item" || mode === "items") {
+      const items = this.timelinePanel.itemIntervals();
+      if (!items.length) return { showHeat: false, heatScope: null, heatHint: "Import and line up an event timeline to show traces by item" };
+      const chosen = mode === "item" ? [this.traceItem].filter((i) => items[i]) : [...this.traceTicked].filter((i) => items[i]).sort((a, b) => a - b);
+      const traces = chosen.map((i, k) => ({ from: items[i].from, to: items[i].to, colour: mode === "item" ? "#9aa5b1" : traceColour(k, chosen.length), width: mode === "item" ? 1.6 : 1.8 }));
+      const hint = mode === "item"
+        ? (items[this.traceItem] ? `Trace of ${items[this.traceItem].label} (${fmtTime(items[this.traceItem].from)}–${fmtTime(items[this.traceItem].to)})` : "")
+        : chosen.length ? `Traces of ${chosen.length} items` : "Tick items below to show their traces";
+      return { showHeat: false, heatScope: null, heatHint: hint, traces, traceLabels: this.traceLabelPoints(chosen.map((i) => items[i])),
+        trailColour: mode === "item" ? "#c8173f" : undefined } as ReturnType<App["heatState"]>;
+    }
     if (mode === "dest") {
       const w = this.timelinePanel.beforeWindows();
       const sc = this.scope();
@@ -1411,6 +1560,7 @@ export class App {
     this.renderMarks();
     this.renderGate();
     this.renderMarkStatus();
+    this.renderTraceControls();
     this.drawCanvases();
   }
 
@@ -1602,6 +1752,18 @@ export class App {
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
+/** Distinct colours for traces of several items, around the colour wheel. */
+function traceColour(k: number, n: number): string {
+  // Red through orange, green and blue to violet, in item order.
+  return `hsl(${n > 1 ? Math.round((k * 270) / (n - 1)) : 210}, 75%, ${k % 2 ? 40 : 46}%)`;
+}
+
+const LIGHT: Record<string, string> = {
+  "--ink": "#17212b", "--muted": "#5d6a75", "--rule": "#d8dee3", "--field": "#f6f8f9", "--panel": "#ffffff",
+  "--screen": "#3f7d58", "--hilite": "#0099b8", "--hilite-soft": "rgba(0,153,184,0.14)", "--heat": "#1d5fa8",
+  "--trace": "#17212b", "--live": "#b45309", "--dest-hot": "#c8173f", "--dest-other": "#7b8794", "--elsewhere": "#e07b00",
+};
+
 const MARK_NAMES: Record<AnnotationKind, string> = { look: "Phone look", obscured: "Eyes obscured", speech: "Speech", submit: "Submit seen" };
 const MARK_KEYS: Record<AnnotationKind, string> = { look: "G", obscured: "O", speech: "S", submit: "K" };
 const MARK_COLOURS: Record<AnnotationKind, string> = { look: "#a8580a", obscured: "#8e96a0", speech: "#3b6fd8", submit: "#2f9e57" };
@@ -1755,7 +1917,7 @@ const TEMPLATE = `
       </div>
       <div id="capture-panel" class="capture" hidden></div>
       <p class="time-row"><span id="time" class="num big"></span></p>
-      <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they’re looking · G / O / S start and end a mark (phone look, eyes obscured, speech) · K submit seen · Esc clear highlights</p>
+      <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they’re looking · G / O / S start and end a mark (phone look, eyes obscured, speech) · K submit seen · F label this frame · Esc clear highlights</p>
     </section>
     <section class="plane-col">
       <canvas id="plane" aria-label="Where the person is looking, seen from the camera"></canvas>
@@ -1763,11 +1925,13 @@ const TEMPLATE = `
         <span>On the plane:</span>
         <label class="check"><input type="radio" name="dragmode" value="highlight" checked> drag to highlight those times</label>
         <label class="check"><input type="radio" name="dragmode" value="region"> label and edit regions</label>
-        <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="before">the time before each saved response</option><option value="dest">where each look went (dots)</option><option value="off">nothing (off)</option></select></label>
+        <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="before">the time before each saved response</option><option value="dest">where each look went (dots)</option><option value="item">the trace for one item</option><option value="items">traces for ticked items</option><option value="off">nothing (off)</option></select></label>
         <button id="fit-plane">Fit view</button>
         <button id="clear-hl">Clear highlights</button>
+        <button id="export-plane">Export plane (PNG)</button>
       </div>
       <p class="muted small plane-help">In label and edit mode: click a hotspot or drag a box to add a region; click a region to rename or delete it; drag it, or its edges and corners, to move or resize it.</p>
+      <div id="trace-controls" class="trace-controls" hidden></div>
       <div id="region-form" class="row region-form" hidden></div>
     </section>
   </div>

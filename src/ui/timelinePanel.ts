@@ -359,6 +359,11 @@ export class TimelinePanel {
     return buildEpisodes(items, auto, m.looks, m.obscured, m.speech, m.submits, filter, this.host.analysis().coverage);
   }
 
+  /** Each item's span (previous save to submit) with its label, for gaze traces. */
+  itemIntervals(): { label: string; from: number; to: number }[] {
+    return this.episodes("both").map((e) => ({ label: e.label, from: e.from, to: e.submit }));
+  }
+
   private seqHits: { y0: number; y1: number; e: Episode }[] = [];
 
   renderSequence() {

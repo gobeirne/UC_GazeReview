@@ -25,6 +25,12 @@ export interface PlaneState {
   heatHint: string;
   /** Destinations of looks, drawn as dots (hot = in the window before a save). */
   dots?: { h: number; v: number; hot: boolean }[] | null;
+  /** Whole gaze traces to draw (one item in grey, or several in their own colours). */
+  traces?: { from: number; to: number; colour: string; width?: number }[] | null;
+  /** Labels on the trace: a point and its text. */
+  traceLabels?: { h: number; v: number; text: string }[] | null;
+  /** Colour of the playback trail (defaults to the theme's trace colour). */
+  trailColour?: string;
   trailMs: number;
   /** Frames tracked live during playback, drawn when there is no saved analysis at the playhead. */
   live: { trail: LivePoint[]; point: LivePoint | null } | null;
@@ -183,15 +189,26 @@ export class GazePlane {
     return { h0: V.h0 + x0 - 1, h1: V.h0 + x1 + 2, v0: V.v1 - y1 - 2, v1: V.v1 - y0 + 1 };
   }
 
-  draw(st: PlaneState) {
-    const { w, h, ctx } = fitCanvas(this.canvas);
+  /** Colours for this draw (export uses a fixed light palette); falls back to the page's theme. */
+  private palette: Record<string, string> | null = null;
+  private c(name: string): string { return this.palette?.[name] ?? cssVar(name); }
+
+  /** size: draw at a fixed size (for export) instead of filling the on-screen canvas. */
+  draw(st: PlaneState, opts: { size?: { w: number; h: number; scale: number }; palette?: Record<string, string> } = {}) {
+    this.palette = opts.palette ?? null;
+    let w: number, h: number, ctx: CanvasRenderingContext2D;
+    if (opts.size) {
+      w = opts.size.w; h = opts.size.h;
+      this.canvas.width = Math.round(w * opts.size.scale); this.canvas.height = Math.round(h * opts.size.scale);
+      ctx = this.canvas.getContext("2d")!; ctx.setTransform(opts.size.scale, 0, 0, opts.size.scale, 0, 0);
+    } else ({ w, h, ctx } = fitCanvas(this.canvas));
     const V = this.view;
     const s = Math.min(w / (V.h1 - V.h0), h / (V.v1 - V.v0));
     const ox = (w - s * (V.h1 - V.h0)) / 2, oy = (h - s * (V.v1 - V.v0)) / 2;
     this.box = { x: ox, y: oy, s };
     const X = (hd: number) => ox + (hd - V.h0) * s;
     const Y = (vd: number) => oy + (V.v1 - vd) * s;
-    const ink = cssVar("--ink"), muted = cssVar("--muted"), rule = cssVar("--rule"), field = cssVar("--field");
+    const ink = this.c("--ink"), muted = this.c("--muted"), rule = this.c("--rule"), field = this.c("--field");
 
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = field;
@@ -225,7 +242,7 @@ export class GazePlane {
       const H = this.heat;
       const nx = V.h1 - V.h0, ny = V.v1 - V.v0;
       const lm = Math.log1p(H.max);
-      const heatRgb = cssVar("--heat");
+      const heatRgb = this.c("--heat");
       for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
         const c = H.cells[y * nx + x];
         if (!c) continue;
@@ -239,11 +256,28 @@ export class GazePlane {
     // Destinations of looks: others grey underneath, those before a save on top.
     if (st.dots) {
       for (const hot of [false, true]) {
-        ctx.fillStyle = hot ? cssVar("--dest-hot") : cssVar("--dest-other");
+        ctx.fillStyle = hot ? this.c("--dest-hot") : this.c("--dest-other");
         ctx.globalAlpha = hot ? 0.9 : 0.55;
         for (const d of st.dots) if (d.hot === hot && Number.isFinite(d.h)) { ctx.beginPath(); ctx.arc(X(d.h), Y(d.v), hot ? 4 : 3, 0, Math.PI * 2); ctx.fill(); }
       }
       ctx.globalAlpha = 1;
+    }
+
+    // Whole traces of items.
+    if (st.traces && g) {
+      ctx.lineJoin = "round"; ctx.lineCap = "round";
+      for (const tr of st.traces) {
+        ctx.strokeStyle = tr.colour; ctx.lineWidth = tr.width ?? 1.4;
+        const a = Math.max(0, indexAt(g.t, tr.from)), b = indexAt(g.t, tr.to);
+        ctx.beginPath();
+        let pen = false;
+        for (let i = a; i <= b; i++) {
+          if (!g.ok[i] || g.breakBefore[i] || g.t[i] < tr.from) { pen = false; if (!g.ok[i] || g.t[i] < tr.from) continue; }
+          if (pen) ctx.lineTo(X(g.h[i]), Y(g.v[i])); else ctx.moveTo(X(g.h[i]), Y(g.v[i]));
+          pen = true;
+        }
+        ctx.stroke();
+      }
     }
 
     // Regions.
@@ -275,25 +309,25 @@ export class GazePlane {
     ctx.strokeStyle = ink; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(X(0), Y(0), 5, 0, Math.PI * 2); ctx.stroke();
     ctx.fillStyle = ink; ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "center";
-    ctx.fillText("camera", X(0), Y(-ah / 2) + 13);
+    ctx.fillText("camera", X(0), st.inset ? Y(-ah / 2) + 13 : Y(0) + 18);
 
     if (g) {
       // Screen centre from the model.
-      ctx.strokeStyle = cssVar("--screen"); ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = this.c("--screen"); ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.arc(X(g.model.screenH), Y(g.model.screenV), g.model.screenRadius * s, 0, Math.PI * 2); ctx.stroke();
       ctx.setLineDash([]);
 
       // Frames in the highlighted time range.
       if (st.timeBrush) {
-        ctx.fillStyle = cssVar("--hilite");
+        ctx.fillStyle = this.c("--hilite");
         const a = Math.max(0, indexAt(g.t, st.timeBrush.start)), b = indexAt(g.t, st.timeBrush.end);
         for (let i = a; i <= b; i++) if (g.ok[i] && g.t[i] >= st.timeBrush.start) ctx.fillRect(X(g.h[i]) - 1.5, Y(g.v[i]) - 1.5, 3, 3);
       }
 
       // Trail around the playhead.
       const a = Math.max(0, indexAt(g.t, st.playhead - st.trailMs)), b = indexAt(g.t, st.playhead);
-      if (b >= 0 && st.playhead - g.t[b] < 1000) {
-        const trace = cssVar("--trace");
+      if (st.trailMs > 0 && b >= 0 && st.playhead - g.t[b] < 1000) {
+        const trace = st.trailColour ?? this.c("--trace");
         ctx.lineWidth = 2; ctx.lineJoin = "round";
         for (let i = a + 1; i <= b; i++) {
           if (!g.ok[i] || !g.ok[i - 1] || g.breakBefore[i]) continue;
@@ -303,14 +337,27 @@ export class GazePlane {
         }
         ctx.globalAlpha = 1;
         if (g.ok[b]) {
-          ctx.fillStyle = trace; ctx.strokeStyle = cssVar("--panel"); ctx.lineWidth = 2;
+          ctx.fillStyle = trace; ctx.strokeStyle = this.c("--panel"); ctx.lineWidth = 2;
           ctx.beginPath(); ctx.arc(X(g.h[b]), Y(g.v[b]), 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
         }
       }
     }
 
+    // Labels on the trace.
+    if (st.traceLabels) {
+      ctx.font = "600 12px system-ui, sans-serif"; ctx.textAlign = "left";
+      for (const l of st.traceLabels) {
+        const x = X(l.h), y = Y(l.v);
+        ctx.fillStyle = this.c("--ink"); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill();
+        const tw = ctx.measureText(l.text).width;
+        ctx.fillStyle = "rgba(255,255,255,0.88)"; ctx.fillRect(x + 6, y - 16, tw + 8, 17);
+        ctx.strokeStyle = this.c("--rule"); ctx.lineWidth = 1; ctx.strokeRect(x + 6.5, y - 15.5, tw + 7, 16);
+        ctx.fillStyle = "#17212b"; ctx.fillText(l.text, x + 10, y - 3);
+      }
+    }
+
     if (st.live) {
-      const c = cssVar("--live");
+      const c = this.c("--live");
       const tr = st.live.trail.filter((p) => p.t <= st.playhead && p.t > st.playhead - st.trailMs);
       ctx.strokeStyle = c; ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
       for (let i = 1; i < tr.length; i++) {
@@ -328,7 +375,7 @@ export class GazePlane {
 
     for (const [r, dash] of [[st.planeBrush, [5, 4]], [st.draft, [2, 3]]] as const) {
       if (!r) continue;
-      ctx.strokeStyle = cssVar("--hilite"); ctx.lineWidth = 2; ctx.setLineDash([...dash]);
+      ctx.strokeStyle = this.c("--hilite"); ctx.lineWidth = 2; ctx.setLineDash([...dash]);
       const x0 = X(Math.min(r.h0, r.h1)), x1 = X(Math.max(r.h0, r.h1)), y0 = Y(Math.max(r.v0, r.v1)), y1 = Y(Math.min(r.v0, r.v1));
       ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
       ctx.setLineDash([]);

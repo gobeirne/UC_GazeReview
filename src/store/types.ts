@@ -177,6 +177,8 @@ export interface Recording {
   fileDateUtcMs?: number;
   /** Reviewer's marks: phone looks, eyes obscured, speech, submits seen. */
   annotations?: Annotation[];
+  /** Labels placed on the gaze trace at chosen moments (video ms). */
+  traceLabels?: { id: string; t: number }[];
   /** Sound level in 20 ms bins (dB), from the audio track; the audio itself is never kept. */
   audioEnv?: { binMs: number; db: Float32Array };
   createdAt: number;

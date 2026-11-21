@@ -219,3 +219,5 @@ td { padding: 4px 6px; border-bottom: 1px solid var(--rule); }
 #seq-canvas { width: 100%; display: block; border: 1px solid var(--rule); border-radius: 6px; cursor: pointer; }
 .seq-stats { margin: 8px 0 0; padding-left: 18px; }
 .tl-seq input[type=number] { width: 4.5em; }
+.trace-controls { margin: 4px 0 8px; }
+.tick-grid { display: flex; flex-wrap: wrap; gap: 2px 12px; max-height: 120px; overflow: auto; }
