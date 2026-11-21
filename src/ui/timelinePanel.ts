@@ -165,6 +165,11 @@ export class TimelinePanel {
     }
     if (t.id === "tl-order") this.dateOrder = t.value as "dmy" | "mdy";
     if (t.id === "tl-region") { this.region = t.value; this.renderAnalysis(); }
+    if (t.id === "seq-before" || t.id === "seq-after") {
+      const rec = this.host.rec();
+      const v = Math.max(1, Math.min(300, Number(t.value) || 0)) * 1000;
+      if (rec) { if (t.id === "seq-before") rec.settings.seqBeforeMs = v; else rec.settings.seqAfterMs = v; await this.host.save(); }
+    }
     if (t.id?.startsWith("seq-")) this.renderSequence();
     if (t.id === "tl-minframes" || t.id === "tl-lookmode" || t.id === "tl-window" || t.id === "tl-once") {
       const rec = this.host.rec();
@@ -331,7 +336,8 @@ export class TimelinePanel {
 
   private seqOptions() {
     const v = (id: string, d: string) => this.box.querySelector<HTMLSelectElement>(id)?.value ?? d;
-    const [before, after] = v("#seq-range", "30000,15000").split(",").map(Number);
+    const rec = this.host.rec();
+    const before = rec?.settings.seqBeforeMs ?? 30_000, after = rec?.settings.seqAfterMs ?? 15_000;
     return { anchor: v("#seq-anchor", "submit") as Anchor, sort: v("#seq-sort", "item") as "item" | "delay", filter: v("#seq-looks", "both") as LookFilter, before, after };
   }
 
@@ -521,7 +527,8 @@ export class TimelinePanel {
           <label>Line up on <select id="seq-anchor"><option value="submit">submit</option><option value="glance">start of the look</option><option value="speech">end of speech</option></select></label>
           <label>Order <select id="seq-sort"><option value="item">by item</option><option value="delay">by time from look to submit</option></select></label>
           <label>Looks <select id="seq-looks"><option value="both">automatic and marked by hand</option><option value="auto">automatic only</option><option value="manual">marked by hand only</option></select></label>
-          <label>Show <select id="seq-range"><option value="20000,10000">−20 to +10 s</option><option value="30000,15000" selected>−30 to +15 s</option><option value="60000,20000">−60 to +20 s</option></select></label>
+          <label>Show <input id="seq-before" type="number" min="1" max="300" step="1" size="4" value="${Math.round((rec.settings.seqBeforeMs ?? 30_000) / 1000)}"> s before and
+            <input id="seq-after" type="number" min="1" max="300" step="1" size="4" value="${Math.round((rec.settings.seqAfterMs ?? 15_000) / 1000)}"> s after</label>
           <button data-act="export-seq">Export sequence figure (PNG)</button>
         </div>
         <canvas id="seq-canvas" aria-label="Speech, looks and submit for each item, lined up"></canvas>

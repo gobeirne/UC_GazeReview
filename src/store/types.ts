@@ -98,6 +98,9 @@ export interface RecordingSettings {
   gateDb: number | null;
   gateHoldMs: number;
   gateMinMs: number;
+  /** Sequence figure: how far before and after the anchor to show (ms). */
+  seqBeforeMs: number;
+  seqAfterMs: number;
 }
 
 export const DEFAULT_SETTINGS: RecordingSettings = {
@@ -119,6 +122,8 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   gateDb: null,
   gateHoldMs: 400,
   gateMinMs: 250,
+  seqBeforeMs: 30_000,
+  seqAfterMs: 15_000,
 };
 
 /** A mark made by the reviewer while watching. Submit marks are instants (end = start). */
