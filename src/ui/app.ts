@@ -1209,12 +1209,19 @@ export class App {
     return this.rec!.settings.gateDb ?? defaultGate(env);
   }
 
+  /** Detected speech, recomputed only when the sound or the gate settings change (it is used on every frame). */
   private speechSegments(): Interval[] {
     const env = this.rec?.audioEnv;
     if (!env) return [];
     const s = this.rec!.settings;
-    return gateSegments(env, this.gateDb(), s.gateHoldMs, s.gateMinMs);
+    const g = this.gateDb();
+    const c = this.speechCache;
+    if (c && c.env === env && c.db === g && c.hold === s.gateHoldMs && c.min === s.gateMinMs) return c.segs;
+    const segs = gateSegments(env, g, s.gateHoldMs, s.gateMinMs);
+    this.speechCache = { env, db: g, hold: s.gateHoldMs, min: s.gateMinMs, segs };
+    return segs;
   }
+  private speechCache: { env: object; db: number; hold: number; min: number; segs: Interval[] } | null = null;
 
   private async detectSpeech(quiet = false) {
     if (!this.rec) return;

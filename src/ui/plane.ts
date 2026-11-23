@@ -343,12 +343,6 @@ export class GazePlane {
         for (let i = a + 1; i <= b; i++) {
           if (!g.ok[i] || !g.ok[i - 1] || g.breakBefore[i]) continue;
           ctx.globalAlpha = 0.15 + 0.85 * (1 - (st.playhead - g.t[i]) / st.trailMs);
-          if (st.traces) {
-            // Over a coloured trace, a pale edge keeps the fading trail from blending into it.
-            ctx.strokeStyle = this.c("--field"); ctx.lineWidth = 5;
-            ctx.beginPath(); ctx.moveTo(X(g.h[i - 1]), Y(g.v[i - 1])); ctx.lineTo(X(g.h[i]), Y(g.v[i])); ctx.stroke();
-            ctx.lineWidth = 2.5;
-          }
           ctx.strokeStyle = trace;
           ctx.beginPath(); ctx.moveTo(X(g.h[i - 1]), Y(g.v[i - 1])); ctx.lineTo(X(g.h[i]), Y(g.v[i])); ctx.stroke();
         }
