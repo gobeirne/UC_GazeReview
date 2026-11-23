@@ -18,6 +18,15 @@ export class LinkedVideoWindow {
 
   get open(): boolean { return !!this.win && !this.win.closed; }
 
+  /** Opens an empty window now (from a click), so a file loaded after waiting isn't blocked as a pop-up. */
+  prepare(): boolean {
+    if (this.open) return true;
+    this.win = window.open("", "gaze-review-linked", "width=960,height=640");
+    if (!this.win) return false;
+    this.build();
+    return true;
+  }
+
   /** Opens (or reuses) the window with this file. Returns false if the browser blocked the window. */
   show(file: File, link: LinkedVideo): boolean {
     this.link = link;

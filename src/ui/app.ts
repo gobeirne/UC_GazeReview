@@ -141,7 +141,11 @@ export class App {
 
   private wire() {
     const fileInput = this.q<HTMLInputElement>("#file-input");
-    this.q("#open-file").addEventListener("click", () => fileInput.click());
+    this.q("#open-file").addEventListener("click", async () => {
+      const picked = await pickVideo();
+      if (picked === "unsupported") fileInput.click();
+      else if (picked) this.openFile(picked.file, picked.handle);
+    });
     fileInput.addEventListener("change", () => { const f = fileInput.files?.[0]; fileInput.value = ""; if (f) this.openFile(f); });
     this.q<HTMLSelectElement>("#rec-select").addEventListener("change", (e) => this.selectRecording((e.target as HTMLSelectElement).value));
     this.q("#start-capture").addEventListener("click", () => this.beginCapture());
@@ -150,7 +154,12 @@ export class App {
     this.q("#export-cancel").addEventListener("click", () => { this.q("#export-menu").hidden = true; });
     this.q("#folder-btn").addEventListener("click", () => this.folderButton());
     const linkInput = this.q<HTMLInputElement>("#link-input");
-    this.q("#link-video").addEventListener("click", () => linkInput.click());
+    this.q("#link-video").addEventListener("click", async () => {
+      const picked = await pickVideo();
+      if (picked === "unsupported") linkInput.click();
+      else if (picked) this.openLinked(picked.file, picked.handle);
+    });
+    this.q("#video-placeholder").addEventListener("click", (e) => { if ((e.target as HTMLElement).closest("#reopen-video")) this.reopenVideos(); });
     linkInput.addEventListener("change", () => { const f = linkInput.files?.[0]; linkInput.value = ""; if (f) this.openLinked(f); });
     this.q("#linked").addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>("[data-act]");
@@ -163,7 +172,7 @@ export class App {
       const name = sel.value; sel.value = "";
       if (!name) return;
       const v = (await folder.listVideos()).find((x) => x.name === name);
-      if (v) this.openFile(await v.handle.getFile());
+      if (v) this.openFile(await v.handle.getFile(), v.handle);
     });
     const importInput = this.q<HTMLInputElement>("#import-input");
     this.q("#import").addEventListener("click", () => importInput.click());
@@ -337,7 +346,7 @@ export class App {
       this.recordings.map((r) => `<option value="${r.id}" ${r.id === this.rec?.id ? "selected" : ""}>${esc(r.name)}${r.kind === "capture" ? " (screen capture)" : ""}</option>`).join("");
   }
 
-  private async openFile(f: File) {
+  private async openFile(f: File, handle?: FileSystemFileHandle) {
     if (this.busy) return this.say("Wait for the current analysis to finish or stop it first.");
     this.stopCapture();
     this.say(`Reading ${f.name}…`);
@@ -348,15 +357,20 @@ export class App {
       const ix = await indexWebm(src, (p) => this.say(`Indexing ${f.name}: ${Math.round(p * 100)}%`));
       const fromFolder = await this.loadSidecar(f.name, id);
       let rec = await db.getRecording(id);
+      let isNew = false;
       if (!rec) {
+        isNew = true;
         rec = {
           id, name: f.name.replace(/\.[^.]+$/, ""), kind: "file", fileName: f.name, fileSize: f.size,
           durationMs: ix.durationMs, width: ix.width, height: ix.height, frameIntervalMs: medianFrameInterval(ix.frames),
-          segments: [], regions: [], settings: { ...DEFAULT_SETTINGS }, createdAt: Date.now(), updatedAt: Date.now(),
+          // A new video starts with the whole video as its segment.
+          segments: [{ id: newId("seg"), start: 0, end: ix.durationMs, label: "Whole video", note: "", createdAt: Date.now() }],
+          regions: [], settings: { ...DEFAULT_SETTINGS }, createdAt: Date.now(), updatedAt: Date.now(),
         };
         await db.putRecording(rec);
         this.recordings = await db.listRecordings();
       }
+      if (handle) db.putMeta(`file:${id}`, handle).catch(() => {});
       if (ix.dateUtcMs && rec.fileDateUtcMs !== ix.dateUtcMs) { rec.fileDateUtcMs = ix.dateUtcMs; await db.putRecording(rec); }
       this.file = f; this.src = src; this.index = ix;
       if (this.videoUrl) URL.revokeObjectURL(this.videoUrl);
@@ -366,6 +380,9 @@ export class App {
       const fps = 1000 / rec.frameIntervalMs;
       this.say(`${f.name}: ${ix.width}×${ix.height}, ${ix.codecId.replace("V_", "")}, about ${fps.toFixed(1)} frames/s, ${fmtTime(ix.durationMs, 0)} long, ${ix.frames.length.toLocaleString()} frames.` +
         (ix.skippedLaced ? ` ${ix.skippedLaced} laced blocks skipped.` : "") + (fromFolder ? ` ${fromFolder}` : ""));
+      // Sound is quick to read, so it's always done; a new video's analysis starts straight away.
+      if (!rec.audioEnv && ix.audio) this.detectSpeech(true);
+      if (isNew) this.analysePending();
     } catch (e) {
       this.say(`Could not open ${f.name}: ${(e as Error).message}`);
     }
@@ -382,7 +399,11 @@ export class App {
       this.video.removeAttribute("src"); this.video.load();
     }
     await this.loadRec(rec);
-    if (rec.kind === "file" && !this.file) this.say(`Open ${rec.fileName ?? "the video file"} to play the video or analyse more segments. Saved results are shown below.`);
+    if (rec.kind === "file" && !this.file) {
+      const known = await db.getMeta<FileSystemFileHandle>(`file:${rec.id}`);
+      this.say(known ? `Click “Open ${rec.fileName}” on the video panel to reopen it.` : `Open ${rec.fileName ?? "the video file"} to play the video or analyse more segments. Saved results are shown below.`);
+      this.renderPlaceholder(!!known);
+    }
   }
 
   private async loadRec(rec: Recording) {
@@ -592,9 +613,10 @@ export class App {
     if (!seg) return;
     if (!this.src) return this.say(`Open ${this.rec.fileName ?? "the video file"} first.`);
     const gaps = this.noGazeStretches(seg);
-    if (!gaps.length) return this.say("This segment has no stretches without gaze to fill.");
-    const total = totalLength(gaps);
-    if (!confirm(`Analyse again the ${gaps.length} stretch${gaps.length === 1 ? "" : "es"} with no gaze in this segment (${fmtTime(total, 0)} of ${fmtTime(seg.end - seg.start, 0)})? Frames with gaze are kept.`)) return;
+    const notDone = subtract({ start: seg.start, end: seg.end }, this.coverage, this.rec.frameIntervalMs * 1.5);
+    if (!gaps.length && !notDone.length) return this.say("This segment has nothing left to fill.");
+    const total = totalLength(gaps), left = totalLength(notDone);
+    if (!confirm(`Analyse ${[left ? `the ${fmtTime(left, 0)} not yet analysed` : "", gaps.length ? `again the ${gaps.length} stretch${gaps.length === 1 ? "" : "es"} with no gaze (${fmtTime(total, 0)})` : ""].filter(Boolean).join(" and ")} in this segment? Frames with gaze are kept.`)) return;
     const remove: string[] = [], add: Run[] = [];
     for (const r of this.runs) {
       if (!gaps.some((g) => g.start < r.end && g.end > r.start)) continue;
@@ -1024,9 +1046,24 @@ export class App {
     }
   }
 
+  /** Goes to the start of the chosen item, carrying on playing if the video was playing. */
   private goToTraceItem() {
     const it = this.timelinePanel.itemIntervals()[this.traceItem];
-    if (it) { this.video.pause(); this.seek(it.from); }
+    if (it) this.seek(it.from);
+  }
+
+  /** While playing in one-item trace mode, follow the item that contains the playhead. */
+  private followTraceItem(ph: number) {
+    if (this.q<HTMLSelectElement>("#heat-scope").value !== "item") return;
+    const items = this.timelinePanel.itemIntervals();
+    const cur = items[this.traceItem];
+    if (cur && ph >= cur.from && ph <= cur.to) return;
+    const i = items.findIndex((it) => ph >= it.from && ph <= it.to);
+    if (i >= 0 && i !== this.traceItem) {
+      this.traceItem = i;
+      const sel = this.root.querySelector<HTMLSelectElement>("#trace-item");
+      if (sel) sel.value = String(i);
+    }
   }
 
   /** Frame number of a video time: its position in the file's frame list (1-based), or an estimate. */
@@ -1071,7 +1108,9 @@ export class App {
     p2.view = { ...this.plane.view };
     p2.draw({
       gaze: this.gaze, scope: this.scope(), regions: this.rec.regions, playhead: this.playhead(),
-      timeBrush: null, planeBrush: null, draft: null, inset: null, insetAspect: 4 / 3,
+      timeBrush: null, planeBrush: null, draft: null,
+      inset: this.q<HTMLInputElement>("#export-camera").checked && this.video.src && this.video.readyState >= 2 ? this.video : null,
+      insetAspect: (this.video.videoWidth / this.video.videoHeight) || 4 / 3,
       ...hs, heatHint: "", trailMs: this.q<HTMLSelectElement>("#heat-scope").value === "items" ? 0 : 2000, live: null, editable: false, selectedRegion: null,
     }, { size: { w: W, h: PH, scale: 2 }, palette: LIGHT });
     const mode = this.q<HTMLSelectElement>("#heat-scope").value;
@@ -1088,7 +1127,7 @@ export class App {
     const title = mode === "item" && it ? `Gaze trace, ${it.label}` : mode === "items" ? `Gaze traces, ${ticked.length} items` : "Where gaze went";
     ctx.fillText(title, 24, 38);
     ctx.fillStyle = "#5d6a75"; ctx.font = "15px system-ui, sans-serif";
-    const sub = mode === "item" && it ? `${this.rec.name} · ${fmtTime(it.from)}–${fmtTime(it.to)} · grey: the whole item; red: ${fmtTime(this.playhead())} and the 2 s before`
+    const sub = mode === "item" && it ? `${this.rec.name} · ${fmtTime(it.from)}–${fmtTime(it.to)} · grey: the whole item; red: ${fmtTime(this.playhead(), 2)} (frame ${this.frameNumber(this.playhead())}) and the 2 s before`
       : hs.heatHint ? `${this.rec.name} · ${hs.heatHint}` : this.rec.name;
     ctx.fillText(sub, 24, 64);
     ctx.drawImage(off, 0, head, W, PH);
@@ -1101,7 +1140,8 @@ export class App {
       });
     }
     ctx.fillStyle = "#5d6a75"; ctx.font = "12px system-ui, sans-serif";
-    ctx.fillText("Degrees from the camera, as seen from the camera. Their right is on the left.", 24, head + PH + foot - 10);
+    ctx.fillText("Degrees from the camera, as seen from the camera. Their right is on the left." +
+      (this.q<HTMLInputElement>("#export-camera").checked ? ` Camera image: the frame at ${fmtTime(this.playhead(), 2)}.` : ""), 24, head + PH + foot - 10);
     const name = mode === "item" && it ? `-trace-${it.label}` : mode === "items" ? "-traces" : "-plane";
     out.toBlob((b) => b && downloadBlob(`${this.rec!.name.replace(/[^\w.-]+/g, "_")}${name.replace(/[^\w.-]+/g, "_")}.png`, b), "image/png");
   }
@@ -1173,16 +1213,18 @@ export class App {
     return gateSegments(env, this.gateDb(), s.gateHoldMs, s.gateMinMs);
   }
 
-  private async detectSpeech() {
-    if (!this.rec || this.busy) return;
+  private async detectSpeech(quiet = false) {
+    if (!this.rec) return;
     if (!this.src || !this.index) return this.say(`Open ${this.rec.fileName ?? "the video file"} first.`);
+    const recId = this.rec.id;
     try {
-      this.say("Reading the sound track…");
-      const env = await audioEnvelope(this.src, this.index, this.file, (f) => this.say(`Reading the sound track: ${Math.round(f * 100)}%`));
+      if (!quiet) this.say("Reading the sound track…");
+      const env = await audioEnvelope(this.src, this.index, this.file, (f) => { if (!quiet) this.say(`Reading the sound track: ${Math.round(f * 100)}%`); });
+      if (this.rec?.id !== recId) return;
       this.rec.audioEnv = env;
       await this.saveRec();
       this.renderGate(); this.renderMarks(); this.timelinePanel.renderAnalysis();
-      this.say(`Sound read: ${this.speechSegments().length} stretches of speech above the threshold. Adjust the threshold if needed.`);
+      if (!quiet) this.say(`Sound read: ${this.speechSegments().length} stretches of speech above the threshold. Adjust the threshold if needed.`);
     } catch (e) { this.say(`Couldn’t read the sound track: ${(e as Error).message}`); }
   }
 
@@ -1434,6 +1476,7 @@ export class App {
     this.q("#time").textContent = fmtTime(ph);
     this.q("#play").textContent = playing ? "Pause" : "Play";
     if (this.linked.open) this.linked.follow(this.video.currentTime, playing, this.video.playbackRate);
+    if (playing) this.followTraceItem(ph);
     if (this.linked.open !== this.linkedWasOpen) { this.linkedWasOpen = this.linked.open; this.renderLinked(); }
     if (!playing && (this.prefs.live || this.prefs.eyes) && this.tracker.ready && !this.busy && this.video.readyState >= 2 &&
         this.lastAttemptPh !== ph) {
@@ -1486,7 +1529,7 @@ export class App {
       const chosen = mode === "item" ? [this.traceItem].filter((i) => items[i]) : [...this.traceTicked].filter((i) => items[i]).sort((a, b) => a - b);
       const traces = chosen.map((i, k) => ({ from: items[i].from, to: items[i].to, colour: mode === "item" ? "#9aa5b1" : traceColour(k, chosen.length), width: mode === "item" ? 1.6 : 1.8 }));
       const hint = mode === "item"
-        ? (items[this.traceItem] ? `Trace of ${items[this.traceItem].label} (${fmtTime(items[this.traceItem].from)}–${fmtTime(items[this.traceItem].to)})` : "")
+        ? (items[this.traceItem] ? `Trace of ${items[this.traceItem].label} (${fmtTime(items[this.traceItem].from)}–${fmtTime(items[this.traceItem].to)}) · red point: ${fmtTime(this.playhead(), 2)}, frame ${this.frameNumber(this.playhead())}` : "")
         : chosen.length ? `Traces of ${chosen.length} items` : "Tick items below to show their traces";
       return { showHeat: false, heatScope: null, heatHint: hint, traces, traceLabels: this.traceLabelPoints(chosen.map((i) => items[i])),
         trailColour: mode === "item" ? "#c8173f" : undefined } as ReturnType<App["heatState"]>;
@@ -1551,7 +1594,7 @@ export class App {
     this.q("#video-placeholder").hidden = !!this.video.src || this.rec?.kind === "capture";
     this.q("#capture-note").hidden = this.rec?.kind !== "capture";
     this.q("#video-controls").hidden = this.rec?.kind === "capture";
-    if (this.rec?.kind === "file" && !this.file) this.q("#video-placeholder").textContent = `Open ${this.rec.fileName ?? "the video file"} to play it here.`;
+    if (this.rec?.kind === "file" && !this.file) this.renderPlaceholder(false);
     this.renderSegments();
     this.renderEvents();
     this.renderRegions();
@@ -1568,7 +1611,7 @@ export class App {
 
   // ---------- Synchronised second video ----------
 
-  private async openLinked(f: File) {
+  private async openLinked(f: File, handle?: FileSystemFileHandle) {
     if (!this.rec || this.rec.kind !== "file") return this.say("Open the main video first.");
     const existing = this.rec.linked?.find((l) => l.fileName === f.name && l.fileSize === f.size);
     let link = existing;
@@ -1586,10 +1629,38 @@ export class App {
       this.rec.linked = [link];
       await this.saveRec();
     }
+    if (handle) db.putMeta(`linked:${this.rec.id}`, handle).catch(() => {});
     this.linkedFile = f;
     this.linkedFor = this.rec.id;
     if (!this.linked.show(f, link)) this.say("The browser blocked the second window. Allow pop-ups for this page and try again.");
     this.renderLinked();
+  }
+
+  private async renderPlaceholder(known: boolean) {
+    const el = this.q("#video-placeholder");
+    if (!this.rec || this.rec.kind !== "file" || this.file) return;
+    if (!known) known = !!(await db.getMeta(`file:${this.rec.id}`));
+    el.innerHTML = known
+      ? `<button id="reopen-video" class="primary">Open ${esc(this.rec.fileName ?? "the video")}${this.rec.linked?.length ? ` and ${esc(this.rec.linked[0].fileName)}` : ""}</button>`
+      : `Open ${esc(this.rec.fileName ?? "the video file")} to play it here.`;
+  }
+
+  /**
+   * One click: reopens the recording's video (and its synchronised video) from where they were
+   * last opened. The browser remembers the files (Chrome and Edge) and asks once per session to
+   * allow reading them again.
+   */
+  private async reopenVideos() {
+    if (!this.rec) return;
+    const id = this.rec.id;
+    const main = await db.getMeta<FileSystemFileHandle>(`file:${id}`);
+    const linked = this.rec.linked?.length ? await db.getMeta<FileSystemFileHandle>(`linked:${id}`) : undefined;
+    if (linked) this.linked.prepare();
+    try {
+      if (main && (await ensureRead(main))) await this.openFile(await main.getFile(), main);
+      else { this.say(`Couldn’t reopen ${this.rec.fileName ?? "the video"}; use Open video file…`); return; }
+      if (linked && (await ensureRead(linked))) await this.openLinked(await linked.getFile(), linked);
+    } catch (e) { this.say(`Couldn’t reopen the video: ${(e as Error).message}. It may have been moved or renamed; use Open video file…`); }
   }
 
   private async reopenLinked() {
@@ -1630,17 +1701,18 @@ export class App {
     box.innerHTML = this.rec.segments.length ? this.rec.segments.map((s) => {
       const len = s.end - s.start;
       const cov = len - totalLength(subtract({ start: s.start, end: s.end }, this.coverage));
-      const pct = Math.round((100 * cov) / len);
-      const status = pct >= 99 ? "analysed" : pct > 0 ? `${pct}% analysed` : "not analysed";
+      const left = totalLength(subtract({ start: s.start, end: s.end }, this.coverage, this.rec!.frameIntervalMs * 1.5));
+      const pct = Math.floor((100 * cov) / len);
+      const status = left <= 0 ? "analysed" : cov > 0 ? `${pct}% analysed, ${fmtTime(left, 0)} still to do` : "not analysed";
       return `<li class="${s.id === this.scopeSeg ? "selected" : ""}">
         <div class="seg-main"><strong>${esc(s.label || "Segment")}</strong>
           <span class="num">${fmtTime(s.start, 0)}–${fmtTime(s.end, 0)}</span>
           <span class="muted">${status}${s.approx ? ", times approximate" : ""}</span></div>
         <div class="seg-actions">
           <button data-act="scope" data-id="${s.id}">${s.id === this.scopeSeg ? "Show all" : "Show"}</button>
-          ${pct < 99 && this.rec!.kind === "file" ? `<button data-act="analyse" data-id="${s.id}">Analyse</button>` : ""}
-          ${pct > 0 && this.rec!.kind === "file" && this.noGazeStretches(s).length ? `<button data-act="fill" data-id="${s.id}" title="Analyse again only the stretches of this segment with no gaze, keeping the rest">Fill gaps</button>` : ""}
-          ${pct > 0 && this.rec!.kind === "file" ? `<button data-act="reanalyse" data-id="${s.id}" title="Discard this segment’s results and analyse it again with the current version">Re-analyse</button>` : ""}
+          ${left > 0 && this.rec!.kind === "file" ? `<button data-act="analyse" data-id="${s.id}">${cov > 0 ? "Finish analysing" : "Analyse"}</button>` : ""}
+          ${cov > 0 && this.rec!.kind === "file" && (this.noGazeStretches(s).length || left > 0) ? `<button data-act="fill" data-id="${s.id}" title="Analyse the parts not yet analysed, and again the stretches with no gaze, keeping the rest">Fill gaps</button>` : ""}
+          ${cov > 0 && this.rec!.kind === "file" ? `<button data-act="reanalyse" data-id="${s.id}" title="Discard this segment’s results and analyse it again with the current version">Re-analyse</button>` : ""}
           <button data-act="delete" data-id="${s.id}" aria-label="Remove segment">Remove</button>
         </div></li>`;
     }).join("") : `<li class="muted">No segments yet. Add the part of the video you want to look at.</li>`;
@@ -1755,6 +1827,24 @@ export class App {
 }
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
+
+/** File picker that returns a handle the browser can remember (Chrome and Edge); "unsupported" elsewhere. */
+async function pickVideo(): Promise<{ file: File; handle: FileSystemFileHandle } | null | "unsupported"> {
+  const w = window as unknown as { showOpenFilePicker?: (o: object) => Promise<FileSystemFileHandle[]> };
+  if (!w.showOpenFilePicker) return "unsupported";
+  try {
+    const [handle] = await w.showOpenFilePicker({ id: "gaze-review-video", types: [{ description: "Video", accept: { "video/*": [".webm", ".mkv", ".mp4", ".mov"] } }] });
+    return { file: await handle.getFile(), handle };
+  } catch { return null; }
+}
+
+/** Asks for permission to read a remembered file again, if needed. */
+async function ensureRead(h: FileSystemFileHandle): Promise<boolean> {
+  const x = h as FileSystemFileHandle & { queryPermission?: (o: object) => Promise<string>; requestPermission?: (o: object) => Promise<string> };
+  if (!x.queryPermission) return true;
+  if ((await x.queryPermission({ mode: "read" })) === "granted") return true;
+  return (await x.requestPermission!({ mode: "read" })) === "granted";
+}
 
 /** Distinct colours for traces of several items, around the colour wheel. */
 function traceColour(k: number, n: number): string {
@@ -1902,7 +1992,7 @@ const TEMPLATE = `
           <button id="fwd-frame" aria-label="Forward one frame">+frame</button>
           <button data-jump="5000" aria-label="Forward 5 seconds">+5 s</button>
           <button data-jump="10000" aria-label="Forward 10 seconds">+10 s</button>
-          <select id="rate" aria-label="Playback speed"><option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+          <select id="rate" aria-label="Playback speed"><option value="0.25">¼×</option><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select>
           <button id="sound" aria-pressed="true">Sound on</button>
           <input id="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume">
         </div>
@@ -1933,6 +2023,7 @@ const TEMPLATE = `
         <button id="fit-plane">Fit view</button>
         <button id="clear-hl">Clear highlights</button>
         <button id="export-plane">Export plane (PNG)</button>
+        <label class="check small"><input type="checkbox" id="export-camera"> with the camera image</label>
       </div>
       <p class="muted small plane-help">In label and edit mode: click a hotspot or drag a box to add a region; click a region to rename or delete it; drag it, or its edges and corners, to move or resize it.</p>
       <div id="trace-controls" class="trace-controls" hidden></div>
