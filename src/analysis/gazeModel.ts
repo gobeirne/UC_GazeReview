@@ -353,9 +353,10 @@ function baseline(t: Float64Array, x: Float32Array, member: Uint8Array, windowMs
     while (lo < n && t[lo] < g - half) lo++;
     while (hi < n && t[hi] <= g + half) hi++;
     const w: number[] = [];
-    for (let i = lo; i < hi; i++) if (member[i]) w.push(x[i]);
+    // Every second on-screen frame is plenty for a median over a minute, and halves the work.
+    for (let i = lo; i < hi; i += 2) if (member[i]) w.push(x[i]);
     grid.push(g);
-    vals.push(w.length >= 30 ? median(w) : NaN);
+    vals.push(w.length >= 15 ? quickMedian(w) : NaN);
   }
   // Grid points without enough on-screen frames take the nearest point that has them, so a
   // posture change across a stretch without gaze carries over; the overall centre only if none do.
@@ -378,6 +379,30 @@ function baseline(t: Float64Array, x: Float32Array, member: Uint8Array, windowMs
     out[i] = vals[g] + f * ((vals[g + 1] ?? vals[g]) - vals[g]);
   }
   return out;
+}
+
+/** Median by selection (no full sort); reorders the array it's given. */
+function quickMedian(a: number[]): number {
+  const select = (k: number) => {
+    let lo = 0, hi = a.length - 1;
+    while (lo < hi) {
+      const pivot = a[(lo + hi) >> 1];
+      let i = lo, j = hi;
+      while (i <= j) {
+        while (a[i] < pivot) i++;
+        while (a[j] > pivot) j--;
+        if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+      }
+      if (k <= j) hi = j; else if (k >= i) lo = i; else return a[k];
+    }
+    return a[k];
+  };
+  const m = a.length >> 1;
+  if (a.length % 2) return select(m);
+  const hiV = select(m);
+  let loV = -Infinity;
+  for (let i = 0; i < m; i++) if (a[i] > loV) loV = a[i];
+  return (loV + hiV) / 2;
 }
 
 function median(a: number[]): number {

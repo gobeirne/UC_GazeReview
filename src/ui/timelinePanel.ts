@@ -22,6 +22,8 @@ export interface TimelineHost {
   analysis(): { gaze: GazeSeries | null; labels: Int16Array | null; glances: GazeEvent[]; regions: Region[]; coverage: Interval[] };
   /** The gaze plane's current view, for the figure. */
   planeView(): { h0: number; h1: number; v0: number; v1: number };
+  /** Called when the timeline's start time is set or changed. */
+  synced?(): void;
   /** Reviewer's marks and detected speech (video ms). */
   marks(): { looks: Interval[]; obscured: Interval[]; speech: Interval[]; submits: number[] };
   say(s: string): void;
@@ -112,6 +114,7 @@ export class TimelinePanel {
     await this.host.save();
     this.render();
     this.host.redraw();
+    this.host.synced?.();
   }
 
   private async click(e: Event) {

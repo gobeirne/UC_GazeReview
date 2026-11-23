@@ -197,7 +197,7 @@ export function itemPositions(items: { from: number; to: number }[], looks: numb
   // item's looks were a single burst. That is the widest spread the null can have, so the test is
   // conservative about bursts (a median of several independent positions would cluster nearer 0.5).
   const mean = n ? perItem.reduce((a, b) => a + b, 0) / n : NaN;
-  const SIMS = 100_000;
+  const SIMS = 20_000;
   let seed = 54321, atLeast = 0;
   const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
   if (n) for (let i = 0; i < SIMS; i++) {

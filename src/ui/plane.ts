@@ -45,7 +45,8 @@ const CURSORS: Record<Grab, string> = { move: "move", n: "ns-resize", s: "ns-res
 /** Camera-centred azimuth/elevation plane. h positive = image right (the person's left), v positive = up. */
 export class GazePlane {
   view = { h0: -60, h1: 60, v0: -50, v1: 30 };
-  private heat: { key: string; cells: Float32Array; max: number } | null = null;
+  private traceLayer: { key: string; layer: HTMLCanvasElement } | null = null;
+  private heat: { key: string; cells: Float32Array; max: number; image?: HTMLCanvasElement; colour?: string } | null = null;
   private box = { x: 0, y: 0, s: 1 };
   private drag: { h: number; v: number } | null = null;
   private grab: { id: string; how: Grab; from: { h: number; v: number }; orig: Rect; moved: boolean } | null = null;
@@ -241,16 +242,30 @@ export class GazePlane {
       if (!this.heat || this.heat.key !== key) this.heat = buildHeat(g, st.heatScope, V, key);
       const H = this.heat;
       const nx = V.h1 - V.h0, ny = V.v1 - V.v0;
-      const lm = Math.log1p(H.max);
       const heatRgb = this.c("--heat");
-      for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
-        const c = H.cells[y * nx + x];
-        if (!c) continue;
-        ctx.globalAlpha = 0.12 + 0.78 * (Math.log1p(c) / lm);
-        ctx.fillStyle = heatRgb;
-        ctx.fillRect(X(V.h0 + x), Y(V.v1 - y), s + 0.5, s + 0.5);
+      // The heatmap is drawn once into a 1-pixel-per-degree image and scaled up, rather than
+      // as thousands of rectangles on every frame.
+      if (!H.image || H.colour !== heatRgb) {
+        const lm = Math.log1p(H.max);
+        const img = document.createElement("canvas");
+        img.width = nx; img.height = ny;
+        const ic = img.getContext("2d")!;
+        ic.fillStyle = heatRgb; ic.fillRect(0, 0, 1, 1);
+        const [r, gr, bl] = ic.getImageData(0, 0, 1, 1).data;
+        const data = ic.createImageData(nx, ny);
+        for (let k = 0; k < nx * ny; k++) {
+          const c = H.cells[k];
+          if (!c) continue;
+          data.data[k * 4] = r; data.data[k * 4 + 1] = gr; data.data[k * 4 + 2] = bl;
+          data.data[k * 4 + 3] = Math.round(255 * (0.12 + 0.78 * (Math.log1p(c) / lm)));
+        }
+        ic.putImageData(data, 0, 0);
+        H.image = img; H.colour = heatRgb;
       }
-      ctx.globalAlpha = 1;
+      const smooth = ctx.imageSmoothingEnabled;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(H.image, X(V.h0), Y(V.v1), nx * s, ny * s);
+      ctx.imageSmoothingEnabled = smooth;
     }
 
     // Destinations of looks: others grey underneath, those before a save on top.
@@ -263,32 +278,20 @@ export class GazePlane {
       ctx.globalAlpha = 1;
     }
 
-    // Whole traces of items. With speech given, the parts while speaking take speechColour.
+    // Whole traces of items, drawn into a cached layer that is only redrawn when the traces, the
+    // view or the size change; each frame then just copies it (the red trail is drawn live).
     if (st.traces && g) {
-      ctx.lineJoin = "round"; ctx.lineCap = "round";
-      for (const tr of st.traces) {
-        ctx.lineWidth = tr.width ?? 1.4;
-        const sp = tr.speech ?? [];
-        let k = 0;
-        const speaking = (t: number) => { while (k < sp.length && sp[k].end <= t) k++; return k < sp.length && sp[k].start <= t; };
-        const a = Math.max(0, indexAt(g.t, tr.from)), b = indexAt(g.t, tr.to);
-        let prev = -1, prevSpeak = false;
-        let colour = "";
-        for (let i = a; i <= b; i++) {
-          if (!g.ok[i] || g.t[i] < tr.from) { prev = -1; continue; }
-          const sNow = tr.speechColour ? speaking(g.t[i]) : false;
-          if (prev >= 0 && !g.breakBefore[i]) {
-            // Each step takes the state of its end point, so speech starts and ends at the right frame.
-            const c = sNow ? tr.speechColour! : tr.colour;
-            if (c !== colour) { if (colour) ctx.stroke(); ctx.strokeStyle = c; colour = c; ctx.beginPath(); ctx.moveTo(X(g.h[prev]), Y(g.v[prev])); }
-            ctx.lineTo(X(g.h[i]), Y(g.v[i]));
-          } else if (colour) { ctx.stroke(); colour = ""; }
-          if (!colour) { ctx.beginPath(); ctx.moveTo(X(g.h[i]), Y(g.v[i])); colour = ""; }
-          prev = i; prevSpeak = sNow;
-        }
-        if (colour) ctx.stroke();
-        void prevSpeak;
+      const sp = st.traces.map((t) => `${t.from}:${t.to}:${t.colour}:${t.width}:${t.speechColour ?? ""}:${t.speech?.length ?? 0}:${t.speech?.[0]?.start ?? ""}`).join("|");
+      const key = `${g.n}:${g.t[0]}:${g.h[0]}:${sp}:${V.h0}:${V.h1}:${V.v0}:${V.v1}:${this.canvas.width}:${this.canvas.height}:${w}:${h}`;
+      if (!this.traceLayer || this.traceLayer.key !== key) {
+        const layer = document.createElement("canvas");
+        layer.width = this.canvas.width; layer.height = this.canvas.height;
+        const lc = layer.getContext("2d")!;
+        lc.setTransform(this.canvas.width / w, 0, 0, this.canvas.height / h, 0, 0);
+        drawTraces(lc, g, st.traces, X, Y);
+        this.traceLayer = { key, layer };
       }
+      ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(this.traceLayer.layer, 0, 0); ctx.restore();
     }
 
     // Regions.
@@ -391,6 +394,30 @@ export class GazePlane {
       ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
       ctx.setLineDash([]);
     }
+  }
+}
+
+/** Whole traces; with speech given, the parts while speaking take speechColour. */
+function drawTraces(ctx: CanvasRenderingContext2D, g: GazeSeries, traces: NonNullable<PlaneState["traces"]>, X: (h: number) => number, Y: (v: number) => number) {
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  for (const tr of traces) {
+    ctx.lineWidth = tr.width ?? 1.4;
+    const sp = tr.speech ?? [];
+    let k = 0;
+    const speaking = (t: number) => { while (k < sp.length && sp[k].end <= t) k++; return k < sp.length && sp[k].start <= t; };
+    const a = Math.max(0, indexAt(g.t, tr.from)), b = indexAt(g.t, tr.to);
+    let prev = -1, colour = "";
+    for (let i = a; i <= b; i++) {
+      if (!g.ok[i] || g.t[i] < tr.from) { if (colour) { ctx.stroke(); colour = ""; } prev = -1; continue; }
+      if (prev >= 0 && !g.breakBefore[i]) {
+        // Each step takes the state of its end point, so speech starts and ends at the right frame.
+        const c = tr.speechColour && speaking(g.t[i]) ? tr.speechColour : tr.colour;
+        if (c !== colour) { if (colour) ctx.stroke(); ctx.strokeStyle = c; colour = c; ctx.beginPath(); ctx.moveTo(X(g.h[prev]), Y(g.v[prev])); }
+        ctx.lineTo(X(g.h[i]), Y(g.v[i]));
+      } else if (colour) { ctx.stroke(); colour = ""; }
+      prev = i;
+    }
+    if (colour) ctx.stroke();
   }
 }
 

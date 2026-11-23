@@ -91,11 +91,17 @@ function finish(sum: Float64Array, cnt: Float64Array): Envelope {
   return { binMs: BIN_MS, db };
 }
 
-/** Level at the 20th percentile (the quiet background) and 95th percentile (loud), dB. */
+const statsCache = new WeakMap<Float32Array, { quiet: number; loud: number }>();
+
+/** Level at the 20th percentile (the quiet background) and 95th percentile (loud), dB. Worked out once per envelope. */
 export function levelStats(env: Envelope): { quiet: number; loud: number } {
-  const v = Array.from(env.db).filter(Number.isFinite).sort((x, y) => x - y);
+  const hit = statsCache.get(env.db);
+  if (hit) return hit;
+  const v = Float32Array.from(Array.from(env.db).filter(Number.isFinite)).sort();
   const q = (p: number) => (v.length ? v[Math.min(v.length - 1, Math.floor(p * v.length))] : NaN);
-  return { quiet: q(0.2), loud: q(0.95) };
+  const r = { quiet: q(0.2), loud: q(0.95) };
+  statsCache.set(env.db, r);
+  return r;
 }
 
 /** Default gate: 12 dB above the quiet background. */

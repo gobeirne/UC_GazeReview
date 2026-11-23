@@ -68,6 +68,8 @@ export class App {
   private linkedWasOpen = false;
   private marking: { kind: AnnotationKind; start: number } | null = null;
   private traceItem = 0;
+  /** The reviewer picked a plane view themselves (else a lined-up timeline switches it to one item's trace). */
+  private heatChosen = false;
   private traceTicked = new Set<number>();
   private linked = new LinkedVideoWindow();
   private liveFpr: Fingerprinter | null = null;
@@ -99,6 +101,7 @@ export class App {
       analysis: () => ({ gaze: this.gaze, labels: this.labels, glances: this.events, regions: this.rec?.regions ?? [], coverage: this.coverage }),
       planeView: () => ({ ...this.plane.view }),
       marks: () => this.marksForAnalysis(),
+      synced: () => { this.defaultTraceView(); this.renderTraceControls(); this.dirty = true; },
       say: (m) => this.say(m),
       redraw: () => this.drawCanvases(),
     });
@@ -132,6 +135,10 @@ export class App {
     this.q<HTMLInputElement>("#show-eyes").checked = this.prefs.eyes;
     this.q<HTMLInputElement>("#volume").value = String(this.prefs.volume);
     this.renderSound();
+    for (const ev of ["pointermove", "pointerdown", "pointerup", "wheel", "keydown", "input", "change", "click"]) {
+      this.root.addEventListener(ev, () => { this.dirty = true; }, { passive: true, capture: true });
+    }
+    window.addEventListener("resize", () => { this.dirty = true; });
     const tick = () => { this.frame(); requestAnimationFrame(tick); };
     requestAnimationFrame(tick);
     new ResizeObserver(() => this.drawCanvases()).observe(this.root);
@@ -253,7 +260,7 @@ export class App {
     this.q("#detect-speech").addEventListener("click", () => this.detectSpeech());
     this.q("#gate").addEventListener("change", () => this.readGate());
     this.q("#gate-auto").addEventListener("change", () => this.readGate());
-    this.q<HTMLSelectElement>("#heat-scope").addEventListener("change", () => { this.plane.invalidateHeat(); this.renderTraceControls(); this.drawCanvases(); });
+    this.q<HTMLSelectElement>("#heat-scope").addEventListener("change", () => { this.heatChosen = true; this.plane.invalidateHeat(); this.renderTraceControls(); this.drawCanvases(); });
     this.q("#export-plane").addEventListener("click", () => this.exportPlane());
     this.q("#trace-controls").addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>("[data-act]");
@@ -1493,8 +1500,17 @@ export class App {
       this.lastAttemptPh = ph;
       if (!(Math.abs(this.lastLiveT - ph) <= 1)) this.trackCurrentFrame();
     }
-    this.drawCanvases();
+    // Redraw only when something has changed: the playhead moved, live tracking produced a frame,
+    // or the reviewer did something (pointer, keys, scrolling, any control). Idle, it costs nothing.
+    const liveKey = this.lastLiveT;
+    if (playing || this.dirty || !Object.is(ph, this.drawnPh) || !Object.is(liveKey, this.drawnLive) || this.capturing) {
+      this.drawnPh = ph; this.drawnLive = liveKey; this.dirty = false;
+      this.drawCanvases();
+    }
   }
+  private dirty = true;
+  private drawnPh = NaN;
+  private drawnLive = NaN;
 
   private drawCanvases() {
     if (!this.plane) return;
@@ -1617,6 +1633,7 @@ export class App {
     this.renderMarks();
     this.renderGate();
     this.renderMarkStatus();
+    this.defaultTraceView();
     this.renderTraceControls();
     this.drawCanvases();
   }
@@ -1646,6 +1663,11 @@ export class App {
     this.linkedFor = this.rec.id;
     if (!this.linked.show(f, link)) this.say("The browser blocked the second window. Allow pop-ups for this page and try again.");
     this.renderLinked();
+  }
+
+  private defaultTraceView() {
+    const sel = this.q<HTMLSelectElement>("#heat-scope");
+    if (!this.heatChosen && this.rec?.timeline && this.rec.sync?.startClock && sel.value === "scope") sel.value = "item";
   }
 
   private async renderPlaceholder(known: boolean) {

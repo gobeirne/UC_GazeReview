@@ -232,11 +232,15 @@ export class Detail {
       const a = Math.max(0, indexAt(g.t, st.win.start)), b = indexAt(g.t, st.win.end);
       const dt = g.model.frameIntervalMs;
       const screenC = cssVar("--screen"), elseC = cssVar("--elsewhere"), noneC = cssVar("--nodata");
-      for (let i = a; i <= b; i++) {
+      // One rectangle per run of frames with the same label (not one per frame).
+      for (let i = a; i <= b;) {
         const l = lab[i];
+        let j = i;
+        while (j + 1 <= b && lab[j + 1] === l && g.t[j + 1] - g.t[j] <= 2 * dt) j++;
         ctx.fillStyle = l === SCREEN ? screenC : l === ELSEWHERE ? elseC : l === NONE ? noneC : st.regions[l]?.colour ?? elseC;
-        const x0 = X(g.t[i]), x1 = X(g.t[i] + dt);
+        const x0 = X(g.t[i]), x1 = X(g.t[j] + dt);
         ctx.fillRect(x0, bandY, Math.max(1, x1 - x0), bandH);
+        i = j + 1;
       }
       // Blinks removed by the model: a thin dark line along the top of the band.
       ctx.fillStyle = cssVar("--ink");
