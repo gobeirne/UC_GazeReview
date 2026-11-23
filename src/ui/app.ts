@@ -274,6 +274,7 @@ export class App {
     this.q("#trace-controls").addEventListener("change", (e) => {
       const t = e.target as HTMLInputElement;
       if (t.id === "trace-item") { this.traceItem = Number(t.value); this.goToTraceItem(); }
+      if (t.id === "trace-speech") { this.prefs.traceSpeech = t.checked; savePrefs(this.prefs); this.renderTraceControls(); this.drawCanvases(); }
       if (t.dataset.tick) { const i = Number(t.dataset.tick); if (t.checked) this.traceTicked.add(i); else this.traceTicked.delete(i); }
     });
     this.q("#fit-plane").addEventListener("click", () => { this.plane.fitTo(this.gaze); this.drawCanvases(); });
@@ -1032,7 +1033,8 @@ export class App {
         <button data-act="trace-next" aria-label="Next item">▶</button>
         <button data-act="trace-label">Label this frame (F)</button>
         <button data-act="trace-clear">Clear labels in this item</button>
-        <span class="muted">${this.marksForAnalysis().speech.length ? "Blue: speaking; grey: silent" : "Grey: the whole item"}; red: the moment playing and its trail.</span></div>`;
+        <label class="check"><input type="checkbox" id="trace-speech" ${this.prefs.traceSpeech !== false ? "checked" : ""}> colour by speech</label>
+        <span class="muted">${this.prefs.traceSpeech !== false && this.marksForAnalysis().speech.length ? "Blue: speaking; grey: silent" : "Grey: the whole item"}; red: the moment playing and its trail.</span></div>`;
     } else {
       box.innerHTML = `<div class="row small"><button data-act="tick-all">All</button><button data-act="tick-none">None</button>
         <button data-act="trace-label">Label this frame (F)</button></div>
@@ -1127,7 +1129,7 @@ export class App {
     const title = mode === "item" && it ? `Gaze trace, ${it.label}` : mode === "items" ? `Gaze traces, ${ticked.length} items` : "Where gaze went";
     ctx.fillText(title, 24, 38);
     ctx.fillStyle = "#5d6a75"; ctx.font = "15px system-ui, sans-serif";
-    const spoke = this.marksForAnalysis().speech.length > 0;
+    const spoke = this.prefs.traceSpeech !== false && this.marksForAnalysis().speech.length > 0;
     const sub = mode === "item" && it ? `${this.rec.name} · ${fmtTime(it.from)}–${fmtTime(it.to)} · ${spoke ? "blue: while speaking; grey: silent" : "grey: the whole item"}; red: ${fmtTime(this.playhead(), 2)} (frame ${this.frameNumber(this.playhead())}) and the 2 s before`
       : hs.heatHint ? `${this.rec.name} · ${hs.heatHint}` : this.rec.name;
     ctx.fillText(sub, 24, 64);
@@ -1528,7 +1530,7 @@ export class App {
       const items = this.timelinePanel.itemIntervals();
       if (!items.length) return { showHeat: false, heatScope: null, heatHint: "Import and line up an event timeline to show traces by item" };
       const chosen = mode === "item" ? [this.traceItem].filter((i) => items[i]) : [...this.traceTicked].filter((i) => items[i]).sort((a, b) => a - b);
-      const speech = mode === "item" ? this.marksForAnalysis().speech : [];
+      const speech = mode === "item" && this.prefs.traceSpeech !== false ? this.marksForAnalysis().speech : [];
       const traces = chosen.map((i, k) => ({ from: items[i].from, to: items[i].to, colour: mode === "item" ? "#9aa5b1" : traceColour(k, chosen.length), width: mode === "item" ? 1.8 : 1.8,
         ...(speech.length ? { speech, speechColour: SPEECH_TRACE } : {}) }));
       const hint = mode === "item"
@@ -1914,7 +1916,7 @@ class RecordingLock {
   private pendingRelease: (() => void) | null = null;
 }
 
-interface Prefs { muted: boolean; volume: number; live: boolean; eyes: boolean }
+interface Prefs { muted: boolean; volume: number; live: boolean; eyes: boolean; traceSpeech?: boolean }
 function loadPrefs(): Prefs {
   const d: Prefs = { muted: false, volume: 1, live: true, eyes: true };
   try { return { ...d, ...JSON.parse(localStorage.getItem("gaze-review-prefs") ?? "{}") }; } catch { return d; }
