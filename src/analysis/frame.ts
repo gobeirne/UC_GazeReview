@@ -1,4 +1,4 @@
-import { extractFeatures, type RawFace } from "../tracking/FeatureExtractor";
+import { extractFeatures, segmentCoords, type RawFace } from "../tracking/FeatureExtractor";
 import { LM } from "../tracking/landmarks";
 import { FIELDS, FP_H, FP_SIZE, FP_W, newId, type Field, type Run } from "../store/types";
 import type { Interval } from "./intervals";
@@ -36,11 +36,21 @@ export function measure(raw: RawFace | undefined, gain = 1): FrameValues | null 
   const d = (a: number, b: number) => Math.hypot((n[a].x - n[b].x) * W, (n[a].y - n[b].y) * H);
   const open = (o: number, i: number, u: number, l: number) => { const w = d(o, i); return w > 0 ? d(u, l) / w : NaN; };
   const v = (x: number | undefined) => (x === undefined || !Number.isFinite(x) ? NaN : x);
+  // Eye values are stored whether or not the eye looks closed (UC_TFR's feature extraction drops
+  // them when the blink score is above 0.5 or the lids nearly shut). Looking down lowers the lids,
+  // and the face model often scores that as a blink, so the cut-off is applied later, from the
+  // stored blink scores and lid openings, with thresholds the reviewer can change.
+  const P = (i: number) => ({ x: n[i].x * W, y: n[i].y * H });
+  const iris = (a: number, b: number, c: number) => (n.length > c ? segmentCoords(P(c), P(a), P(b)) : null);
+  const ri = iris(LM.rEyeOuter, LM.rEyeInner, LM.rIrisCentre), li = iris(LM.lEyeInner, LM.lEyeOuter, LM.lIrisCentre);
+  const bs = raw.blendshapes;
+  const b = (k: string) => (bs ? (bs[k] ?? 0) : NaN);
   return {
     headH: v(s.gaze?.headOffH), headV: v(s.gaze?.headOffV),
     noseX: v(f.noseX), noseY: v(f.noseY),
-    bHL: v(f.lGazeH), bHR: v(f.rGazeH), bVL: v(f.lGazeV), bVR: v(f.rGazeV),
-    iHL: v(f.lIrisH), iHR: v(f.rIrisH), iVL: v(f.lIrisV), iVR: v(f.rIrisV),
+    bHL: v(b("eyeLookInLeft") - b("eyeLookOutLeft")), bHR: v(b("eyeLookOutRight") - b("eyeLookInRight")),
+    bVL: v(b("eyeLookUpLeft") - b("eyeLookDownLeft")), bVR: v(b("eyeLookUpRight") - b("eyeLookDownRight")),
+    iHL: v(li?.along), iHR: v(ri?.along), iVL: v(li?.across), iVR: v(ri?.across),
     blinkL: v(raw.blendshapes?.eyeBlinkLeft), blinkR: v(raw.blendshapes?.eyeBlinkRight),
     openL: open(LM.lEyeOuter, LM.lEyeInner, LM.lEyeUpper, LM.lEyeLower),
     openR: open(LM.rEyeOuter, LM.rEyeInner, LM.rEyeUpper, LM.rEyeLower),

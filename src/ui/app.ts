@@ -862,6 +862,8 @@ export class App {
     s.blinkHoldMs = Math.max(0, num("#set-blink") || 0);
     s.blinkFilter = this.q<HTMLInputElement>("#set-blinkfilter").checked;
     s.distanceCorrection = this.q<HTMLInputElement>("#set-distance").checked;
+    s.eyeBlinkMax = Math.min(1, Math.max(0.1, num("#set-blinkmax") || 0.5));
+    s.eyeOpenMin = Math.min(0.5, Math.max(0, Number.isFinite(num("#set-openmin")) ? num("#set-openmin") : 0.12));
     s.blinkLidPct = Math.min(95, Math.max(20, num("#set-blinkpct") || 70));
     s.blinkMaxMs = Math.max(100, num("#set-blinkmax") || 400);
     this.saveRec();
@@ -1714,6 +1716,8 @@ export class App {
     this.q<HTMLInputElement>("#set-blink").value = String(s.blinkHoldMs);
     this.q<HTMLInputElement>("#set-blinkfilter").checked = s.blinkFilter;
     this.q<HTMLInputElement>("#set-distance").checked = s.distanceCorrection;
+    this.q<HTMLInputElement>("#set-blinkmax").value = String(s.eyeBlinkMax);
+    this.q<HTMLInputElement>("#set-openmin").value = String(s.eyeOpenMin);
     this.q<HTMLInputElement>("#set-blinkpct").value = String(s.blinkLidPct);
     this.q<HTMLInputElement>("#set-blinkmax").value = String(s.blinkMaxMs);
     this.q("#model-info").innerHTML = m ? `
@@ -1986,6 +1990,7 @@ const TEMPLATE = `
         <label class="check"><input type="checkbox" id="set-distance"> Correct for leaning towards or away from the camera</label>
         <label class="check"><input type="checkbox" id="set-blinkfilter"> Remove blinks from the eye trace</label>
         <label>A blink is the lids below <input id="set-blinkpct" size="3" inputmode="numeric"> % of usual for at most <input id="set-blinkmax" size="4" inputmode="numeric"> ms</label>
+        <label>Eyes count as closed when the blink score is above <input id="set-blinkmax" size="4" inputmode="decimal"> or the lids are less than <input id="set-openmin" size="4" inputmode="decimal"> of the eye’s width apart</label>
         <label>Hold the last eye position when the eyes can’t be measured, up to <input id="set-blink" size="4" inputmode="numeric"> ms</label>
       </div>
       <dl id="model-info" class="model-info"></dl>

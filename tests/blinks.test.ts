@@ -30,3 +30,16 @@ describe("blink removal", () => {
     expect(removeBlinks(t, eH, eV, lid, brk, 0.7, 2000, out)).toBe(2);
   });
 });
+
+describe("closed-eye cut-off", () => {
+  test("thresholds decide when an eye's values are used", async () => {
+    const { eyeOpen } = await import("../src/analysis/gazeModel");
+    const def = { eyeBlinkMax: 0.5, eyeOpenMin: 0.12 };
+    expect(eyeOpen(0.3, 0.2, def)).toBe(true);
+    expect(eyeOpen(0.6, 0.2, def)).toBe(false);   // looking down scored as a blink
+    expect(eyeOpen(0.6, 0.2, { eyeBlinkMax: 0.8, eyeOpenMin: 0.12 })).toBe(true);
+    expect(eyeOpen(0.3, 0.08, def)).toBe(false);
+    expect(eyeOpen(0.3, 0.08, { eyeBlinkMax: 0.5, eyeOpenMin: 0.05 })).toBe(true);
+    expect(eyeOpen(NaN, NaN, def)).toBe(true);    // older analyses: no scores stored
+  });
+});

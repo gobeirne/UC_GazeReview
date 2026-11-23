@@ -1,5 +1,5 @@
 import type { FrameValues } from "./frame";
-import { avg, indexAt, PRIORS, rescaleAngle, type GazeSeries } from "./gazeModel";
+import { avg, eyeOpen, indexAt, PRIORS, rescaleAngle, type GazeSeries } from "./gazeModel";
 import type { RecordingSettings } from "../store/types";
 
 export interface LivePoint { t: number; h: number; v: number }
@@ -21,8 +21,9 @@ export class LiveGaze {
     if (this.last && (t < this.last.t || t - this.last.t > 1000)) this.reset();
     if (!values) { this.last = null; return null; }
     let eh: number, ev: number;
-    if (s.eyeSource === "blend") { eh = avg(values.bHL, values.bHR); ev = avg(values.bVL, values.bVR); }
-    else { eh = avg(values.iHL, values.iHR) - 0.5; ev = avg(values.iVL, values.iVR); }
+    const oL = eyeOpen(values.blinkL, values.openL, s), oR = eyeOpen(values.blinkR, values.openR, s);
+    if (s.eyeSource === "blend") { eh = avg(oL ? values.bHL : NaN, oR ? values.bHR : NaN); ev = avg(oL ? values.bVL : NaN, oR ? values.bVR : NaN); }
+    else { eh = avg(oL ? values.iHL : NaN, oR ? values.iHR : NaN) - 0.5; ev = avg(oL ? values.iVL : NaN, oR ? values.iVR : NaN); }
     // Live can't look ahead, so a blink holds the last eye position instead of interpolating.
     const lidMed = g?.model.lidMedian;
     const lid = avg(values.openL, values.openR);

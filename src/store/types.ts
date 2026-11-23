@@ -98,6 +98,9 @@ export interface RecordingSettings {
   gateDb: number | null;
   gateHoldMs: number;
   gateMinMs: number;
+  /** An eye counts as closed (its value unused) when its blink score is above eyeBlinkMax or its lid gap is below eyeOpenMin × eye width. */
+  eyeBlinkMax: number;
+  eyeOpenMin: number;
   /** Sequence figure: how far before and after the anchor to show (ms). */
   seqBeforeMs: number;
   seqAfterMs: number;
@@ -122,6 +125,8 @@ export const DEFAULT_SETTINGS: RecordingSettings = {
   gateDb: null,
   gateHoldMs: 400,
   gateMinMs: 250,
+  eyeBlinkMax: 0.5,
+  eyeOpenMin: 0.12,
   seqBeforeMs: 30_000,
   seqAfterMs: 15_000,
 };

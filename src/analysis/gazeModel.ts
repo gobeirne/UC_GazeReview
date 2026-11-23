@@ -102,8 +102,9 @@ export function buildGaze(runs: Run[], rec: Recording): GazeSeries {
     headH[i] = c.headH[j]; headV[i] = c.headV[j]; noseX[i] = c.noseX[j]; noseY[i] = c.noseY[j];
     lid[i] = valid[i] ? avg(c.openL[j], c.openR[j]) : NaN;
     let h: number, v: number;
-    if (s.eyeSource === "blend") { h = avg(c.bHL[j], c.bHR[j]); v = avg(c.bVL[j], c.bVR[j]); }
-    else { h = avg(c.iHL[j], c.iHR[j]) - 0.5; v = avg(c.iVL[j], c.iVR[j]); }
+    const openL = eyeOpen(c.blinkL[j], c.openL[j], s), openR = eyeOpen(c.blinkR[j], c.openR[j], s);
+    if (s.eyeSource === "blend") { h = avg(openL ? c.bHL[j] : NaN, openR ? c.bHR[j] : NaN); v = avg(openL ? c.bVL[j] : NaN, openR ? c.bVR[j] : NaN); }
+    else { h = avg(openL ? c.iHL[j] : NaN, openR ? c.iHR[j] : NaN) - 0.5; v = avg(openL ? c.iVL[j] : NaN, openR ? c.iVR[j] : NaN); }
     if (Number.isFinite(h) && Number.isFinite(v)) { lastEyeT = t[i]; lastH = h; lastV = v; }
     else if (t[i] - lastEyeT <= s.blinkHoldMs) { h = lastH; v = lastV; }
     eH[i] = h; eV[i] = v;
@@ -252,6 +253,12 @@ export function removeBlinks(t: Float64Array, eH: Float32Array, eV: Float32Array
 export function rescaleAngle(deg: number, ratio: number): number {
   if (!Number.isFinite(deg) || Math.abs(deg) > 85) return deg;
   return Math.atan(Math.tan((deg * Math.PI) / 180) * ratio) * 180 / Math.PI;
+}
+
+/** Whether an eye's values can be used: not scored as a blink, and the lids open enough. Unknown scores don't rule it out. */
+export function eyeOpen(blink: number, open: number, s: { eyeBlinkMax?: number; eyeOpenMin?: number }): boolean {
+  const bm = s.eyeBlinkMax ?? 0.5, om = s.eyeOpenMin ?? 0.12;
+  return !(Number.isFinite(blink) && blink > bm) && !(Number.isFinite(open) && open < om);
 }
 
 export function avg(a: number, b: number): number {
