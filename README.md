@@ -44,7 +44,7 @@ In Chrome and Edge the browser remembers which files were opened (the main video
 
 ### Playing the video
 
-The video plays with sound (*Sound on/off* and the volume slider; the choice is remembered). Buttons jump back or forward 10 s, 5 s or one frame; speeds run from ¼× to 8× (live tracking can't keep up at the higher speeds).
+The video plays with sound (*Sound on/off* and the volume slider; the choice is remembered). *Go to* takes a frame number (as on trace labels) or a time such as 1:52.30, and pauses there; in one-item trace view the item shown follows. Buttons jump back or forward 10 s, 5 s or one frame; speeds run from ¼× to 8× (live tracking can't keep up at the higher speeds).
 
 With *Track gaze live during playback* on, every frame shown is run through the face tracker as it plays, analysed or not, so you can compare what you see with where the tool puts the gaze. Under the video a readout gives the region at that moment and how far the gaze is from the screen centre ("12° to their right, 6° down"), and says whether this comes from the saved analysis or was tracked live. On the plane, live positions are drawn as a dashed amber trail with a ring.
 
@@ -72,7 +72,7 @@ The plane is the view from the camera: the video sits at the camera position, th
 
 **Traces by item** (with an event timeline lined up; once a timeline is lined up this is the default view, until another is chosen). *The trace for one item* draws that item's whole gaze path, from the previous save to its submit: blue where the person is speaking (detected or marked speech) and grey where silent, or all grey if there's no speech or *colour by speech* is unticked (the choice is remembered); choose the item from the list or step with ◀ ▶ (choosing one goes to its start and carries on playing if the video was playing). While the video plays, the item shown follows the playhead into the next item. The current moment and its 2 s trail are drawn over the trace in red, and the note at the top of the plane gives that moment's time and frame number. **F** (or *Label this frame*) labels the gaze point at the current frame with its frame number in the file and its time; labels are saved with the recording, shown on any trace that contains them, and can be cleared item by item. *Traces for ticked items* draws the ticked items together, each in its own colour from red through to violet in item order, with a key.
 
-*Export plane (PNG)* saves the gaze plane as it is shown (traces, labels, dots, heatmap, regions) on a white background with a title, and a key for several items. No video frame is included unless *with the camera image* is ticked, which adds the current frame at the camera position. A single-item export includes the red trail at the current moment and states its time and frame; a multi-item export leaves the trail out.
+*Export plane (PNG)* saves the gaze plane as it is shown (traces, labels, dots, heatmap, regions) on a white background with a title, and a key for several items. *With the camera image* (ticked by default; the choice is remembered) adds the current video frame at the camera position; untick it for an export without the face. A single-item export includes the red trail at the current moment and states its time and frame; a multi-item export leaves the trail out.
 - The **trail** shows the last 2 s up to the playback position.
 - The dashed **circle** is the centre of the main on-screen cluster found by the model.
 - **Drag** to highlight the times when gaze was inside the box; they are marked along the top of the timeline.

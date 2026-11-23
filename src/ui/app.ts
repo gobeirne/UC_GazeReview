@@ -262,6 +262,10 @@ export class App {
     this.q("#gate-auto").addEventListener("change", () => this.readGate());
     this.q<HTMLSelectElement>("#heat-scope").addEventListener("change", () => { this.heatChosen = true; this.plane.invalidateHeat(); this.renderTraceControls(); this.drawCanvases(); });
     this.q("#export-plane").addEventListener("click", () => this.exportPlane());
+    this.q<HTMLInputElement>("#export-camera").checked = this.prefs.exportCamera !== false;
+    this.q("#export-camera").addEventListener("change", (e) => { this.prefs.exportCamera = (e.target as HTMLInputElement).checked; savePrefs(this.prefs); });
+    this.q("#goto-btn").addEventListener("click", () => this.goTo());
+    this.q("#goto").addEventListener("keydown", (e) => { if ((e as KeyboardEvent).key === "Enter") this.goTo(); });
     this.q("#trace-controls").addEventListener("click", (e) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>("[data-act]");
       if (!b) return;
@@ -380,7 +384,7 @@ export class App {
       }
       if (handle) db.putMeta(`file:${id}`, handle).catch(() => {});
       if (ix.dateUtcMs && rec.fileDateUtcMs !== ix.dateUtcMs) { rec.fileDateUtcMs = ix.dateUtcMs; await db.putRecording(rec); }
-      this.file = f; this.src = src; this.index = ix;
+      this.file = f; this.src = src; this.index = ix; this.sortedFrameTimes = null;
       if (this.videoUrl) URL.revokeObjectURL(this.videoUrl);
       this.videoUrl = URL.createObjectURL(f);
       this.video.src = this.videoUrl;
@@ -1075,14 +1079,38 @@ export class App {
     }
   }
 
+  /** Goes to a frame number (as shown on trace labels) or a time such as 1:23.45, and pauses there. */
+  private goTo() {
+    const v = this.q<HTMLInputElement>("#goto").value.trim();
+    if (!v) return;
+    let t: number;
+    if (/^\d+$/.test(v)) {
+      const n = parseInt(v, 10);
+      const fr = this.index?.frames;
+      if (fr?.length) {
+        const sorted = this.sortedFrameTimes ??= fr.map((f) => f.t).sort((a, b) => a - b);
+        if (n < 1 || n > sorted.length) return this.say(`There are ${sorted.length.toLocaleString()} frames; frame ${n} doesn’t exist.`);
+        t = sorted[n - 1];
+      } else t = (n - 1) * (this.rec?.frameIntervalMs ?? 33.3);
+    } else {
+      t = parseTime(v);
+      if (!Number.isFinite(t)) return this.say("Type a frame number (e.g. 3369) or a time (e.g. 1:52.30).");
+    }
+    this.video.pause();
+    // Land just inside the frame so the browser shows that frame, not the one before.
+    this.seek(t + 1);
+  }
+  private sortedFrameTimes: number[] | null = null;
+
   /** Frame number of a video time: its position in the file's frame list (1-based), or an estimate. */
   private frameNumber(t: number): number {
     const fr = this.index?.frames;
     if (fr?.length) {
+      const st = this.sortedFrameTimes ??= fr.map((f) => f.t).sort((a, b) => a - b);
       let best = 0, bd = Infinity;
-      let lo = 0, hi = fr.length - 1;
-      while (lo <= hi) { const m = (lo + hi) >> 1; if (fr[m].t < t) lo = m + 1; else hi = m - 1; }
-      for (const k of [lo - 1, lo, lo + 1]) if (fr[k] && Math.abs(fr[k].t - t) < bd) { bd = Math.abs(fr[k].t - t); best = k; }
+      let lo = 0, hi = st.length - 1;
+      while (lo <= hi) { const m = (lo + hi) >> 1; if (st[m] < t) lo = m + 1; else hi = m - 1; }
+      for (const k of [lo - 1, lo, lo + 1]) if (st[k] !== undefined && Math.abs(st[k] - t) < bd) { bd = Math.abs(st[k] - t); best = k; }
       return best + 1;
     }
     return Math.round(t / (this.rec?.frameIntervalMs ?? 33.3)) + 1;
@@ -1493,7 +1521,7 @@ export class App {
     this.q("#time").textContent = fmtTime(ph);
     this.q("#play").textContent = playing ? "Pause" : "Play";
     if (this.linked.open) this.linked.follow(this.video.currentTime, playing, this.video.playbackRate);
-    if (playing) this.followTraceItem(ph);
+    if (playing || !Object.is(ph, this.drawnPh)) this.followTraceItem(ph);
     if (this.linked.open !== this.linkedWasOpen) { this.linkedWasOpen = this.linked.open; this.renderLinked(); }
     if (!playing && (this.prefs.live || this.prefs.eyes) && this.tracker.ready && !this.busy && this.video.readyState >= 2 &&
         this.lastAttemptPh !== ph) {
@@ -1945,7 +1973,7 @@ class RecordingLock {
   private pendingRelease: (() => void) | null = null;
 }
 
-interface Prefs { muted: boolean; volume: number; live: boolean; eyes: boolean; traceSpeech?: boolean }
+interface Prefs { muted: boolean; volume: number; live: boolean; eyes: boolean; traceSpeech?: boolean; exportCamera?: boolean }
 function loadPrefs(): Prefs {
   const d: Prefs = { muted: false, volume: 1, live: true, eyes: true };
   try { return { ...d, ...JSON.parse(localStorage.getItem("gaze-review-prefs") ?? "{}") }; } catch { return d; }
@@ -2047,7 +2075,8 @@ const TEMPLATE = `
         <p id="mark-status" class="small warn-line"></p>
       </div>
       <div id="capture-panel" class="capture" hidden></div>
-      <p class="time-row"><span id="time" class="num big"></span></p>
+      <p class="time-row"><span id="time" class="num big"></span>
+        <span class="goto"><label class="small">Go to <input id="goto" size="10" placeholder="frame or 1:23.45" aria-label="Frame number or time"></label><button id="goto-btn">Go</button></span></p>
       <p class="keys muted">Space play/pause · ← → one frame (Shift: ten) · N / P next or previous glance · L label where they’re looking · G / O / S start and end a mark (phone look, eyes obscured, speech) · K submit seen · F label this frame · Esc clear highlights</p>
     </section>
     <section class="plane-col">
