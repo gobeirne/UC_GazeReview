@@ -1032,7 +1032,7 @@ export class App {
         <button data-act="trace-next" aria-label="Next item">▶</button>
         <button data-act="trace-label">Label this frame (F)</button>
         <button data-act="trace-clear">Clear labels in this item</button>
-        <span class="muted">Grey: the whole item; red: the moment playing and its trail.</span></div>`;
+        <span class="muted">${this.marksForAnalysis().speech.length ? "Blue: speaking; grey: silent" : "Grey: the whole item"}; red: the moment playing and its trail.</span></div>`;
     } else {
       box.innerHTML = `<div class="row small"><button data-act="tick-all">All</button><button data-act="tick-none">None</button>
         <button data-act="trace-label">Label this frame (F)</button></div>
@@ -1127,7 +1127,8 @@ export class App {
     const title = mode === "item" && it ? `Gaze trace, ${it.label}` : mode === "items" ? `Gaze traces, ${ticked.length} items` : "Where gaze went";
     ctx.fillText(title, 24, 38);
     ctx.fillStyle = "#5d6a75"; ctx.font = "15px system-ui, sans-serif";
-    const sub = mode === "item" && it ? `${this.rec.name} · ${fmtTime(it.from)}–${fmtTime(it.to)} · grey: the whole item; red: ${fmtTime(this.playhead(), 2)} (frame ${this.frameNumber(this.playhead())}) and the 2 s before`
+    const spoke = this.marksForAnalysis().speech.length > 0;
+    const sub = mode === "item" && it ? `${this.rec.name} · ${fmtTime(it.from)}–${fmtTime(it.to)} · ${spoke ? "blue: while speaking; grey: silent" : "grey: the whole item"}; red: ${fmtTime(this.playhead(), 2)} (frame ${this.frameNumber(this.playhead())}) and the 2 s before`
       : hs.heatHint ? `${this.rec.name} · ${hs.heatHint}` : this.rec.name;
     ctx.fillText(sub, 24, 64);
     ctx.drawImage(off, 0, head, W, PH);
@@ -1527,9 +1528,11 @@ export class App {
       const items = this.timelinePanel.itemIntervals();
       if (!items.length) return { showHeat: false, heatScope: null, heatHint: "Import and line up an event timeline to show traces by item" };
       const chosen = mode === "item" ? [this.traceItem].filter((i) => items[i]) : [...this.traceTicked].filter((i) => items[i]).sort((a, b) => a - b);
-      const traces = chosen.map((i, k) => ({ from: items[i].from, to: items[i].to, colour: mode === "item" ? "#9aa5b1" : traceColour(k, chosen.length), width: mode === "item" ? 1.6 : 1.8 }));
+      const speech = mode === "item" ? this.marksForAnalysis().speech : [];
+      const traces = chosen.map((i, k) => ({ from: items[i].from, to: items[i].to, colour: mode === "item" ? "#9aa5b1" : traceColour(k, chosen.length), width: mode === "item" ? 1.8 : 1.8,
+        ...(speech.length ? { speech, speechColour: SPEECH_TRACE } : {}) }));
       const hint = mode === "item"
-        ? (items[this.traceItem] ? `Trace of ${items[this.traceItem].label} (${fmtTime(items[this.traceItem].from)}–${fmtTime(items[this.traceItem].to)}) · red point: ${fmtTime(this.playhead(), 2)}, frame ${this.frameNumber(this.playhead())}` : "")
+        ? (items[this.traceItem] ? `${speech.length ? "Blue: speaking; grey: silent. " : ""}Trace of ${items[this.traceItem].label} (${fmtTime(items[this.traceItem].from)}–${fmtTime(items[this.traceItem].to)}) · red point: ${fmtTime(this.playhead(), 2)}, frame ${this.frameNumber(this.playhead())}` : "")
         : chosen.length ? `Traces of ${chosen.length} items` : "Tick items below to show their traces";
       return { showHeat: false, heatScope: null, heatHint: hint, traces, traceLabels: this.traceLabelPoints(chosen.map((i) => items[i])),
         trailColour: mode === "item" ? "#c8173f" : undefined } as ReturnType<App["heatState"]>;
@@ -1851,6 +1854,9 @@ function traceColour(k: number, n: number): string {
   // Red through orange, green and blue to violet, in item order.
   return `hsl(${n > 1 ? Math.round((k * 270) / (n - 1)) : 210}, 75%, ${k % 2 ? 40 : 46}%)`;
 }
+
+/** Trace colour while speaking (matches speech elsewhere). */
+const SPEECH_TRACE = "#3b6fd8";
 
 const LIGHT: Record<string, string> = {
   "--ink": "#17212b", "--muted": "#5d6a75", "--rule": "#d8dee3", "--field": "#f6f8f9", "--panel": "#ffffff",

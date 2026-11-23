@@ -26,7 +26,7 @@ export interface PlaneState {
   /** Destinations of looks, drawn as dots (hot = in the window before a save). */
   dots?: { h: number; v: number; hot: boolean }[] | null;
   /** Whole gaze traces to draw (one item in grey, or several in their own colours). */
-  traces?: { from: number; to: number; colour: string; width?: number }[] | null;
+  traces?: { from: number; to: number; colour: string; width?: number; speech?: Interval[]; speechColour?: string }[] | null;
   /** Labels on the trace: a point and its text. */
   traceLabels?: { h: number; v: number; text: string }[] | null;
   /** Colour of the playback trail (defaults to the theme's trace colour). */
@@ -263,20 +263,31 @@ export class GazePlane {
       ctx.globalAlpha = 1;
     }
 
-    // Whole traces of items.
+    // Whole traces of items. With speech given, the parts while speaking take speechColour.
     if (st.traces && g) {
       ctx.lineJoin = "round"; ctx.lineCap = "round";
       for (const tr of st.traces) {
-        ctx.strokeStyle = tr.colour; ctx.lineWidth = tr.width ?? 1.4;
+        ctx.lineWidth = tr.width ?? 1.4;
+        const sp = tr.speech ?? [];
+        let k = 0;
+        const speaking = (t: number) => { while (k < sp.length && sp[k].end <= t) k++; return k < sp.length && sp[k].start <= t; };
         const a = Math.max(0, indexAt(g.t, tr.from)), b = indexAt(g.t, tr.to);
-        ctx.beginPath();
-        let pen = false;
+        let prev = -1, prevSpeak = false;
+        let colour = "";
         for (let i = a; i <= b; i++) {
-          if (!g.ok[i] || g.breakBefore[i] || g.t[i] < tr.from) { pen = false; if (!g.ok[i] || g.t[i] < tr.from) continue; }
-          if (pen) ctx.lineTo(X(g.h[i]), Y(g.v[i])); else ctx.moveTo(X(g.h[i]), Y(g.v[i]));
-          pen = true;
+          if (!g.ok[i] || g.t[i] < tr.from) { prev = -1; continue; }
+          const sNow = tr.speechColour ? speaking(g.t[i]) : false;
+          if (prev >= 0 && !g.breakBefore[i]) {
+            // Each step takes the state of its end point, so speech starts and ends at the right frame.
+            const c = sNow ? tr.speechColour! : tr.colour;
+            if (c !== colour) { if (colour) ctx.stroke(); ctx.strokeStyle = c; colour = c; ctx.beginPath(); ctx.moveTo(X(g.h[prev]), Y(g.v[prev])); }
+            ctx.lineTo(X(g.h[i]), Y(g.v[i]));
+          } else if (colour) { ctx.stroke(); colour = ""; }
+          if (!colour) { ctx.beginPath(); ctx.moveTo(X(g.h[i]), Y(g.v[i])); colour = ""; }
+          prev = i; prevSpeak = sNow;
         }
-        ctx.stroke();
+        if (colour) ctx.stroke();
+        void prevSpeak;
       }
     }
 
@@ -332,6 +343,12 @@ export class GazePlane {
         for (let i = a + 1; i <= b; i++) {
           if (!g.ok[i] || !g.ok[i - 1] || g.breakBefore[i]) continue;
           ctx.globalAlpha = 0.15 + 0.85 * (1 - (st.playhead - g.t[i]) / st.trailMs);
+          if (st.traces) {
+            // Over a coloured trace, a pale edge keeps the fading trail from blending into it.
+            ctx.strokeStyle = this.c("--field"); ctx.lineWidth = 5;
+            ctx.beginPath(); ctx.moveTo(X(g.h[i - 1]), Y(g.v[i - 1])); ctx.lineTo(X(g.h[i]), Y(g.v[i])); ctx.stroke();
+            ctx.lineWidth = 2.5;
+          }
           ctx.strokeStyle = trace;
           ctx.beginPath(); ctx.moveTo(X(g.h[i - 1]), Y(g.v[i - 1])); ctx.lineTo(X(g.h[i]), Y(g.v[i])); ctx.stroke();
         }
