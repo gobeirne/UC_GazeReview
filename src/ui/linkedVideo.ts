@@ -62,6 +62,7 @@ export class LinkedVideoWindow {
   .muted{color:#9aa7b2;font-size:12px}
   .status{margin-left:auto}
   .cover{position:absolute;inset:0 0 48px 0;display:grid;place-items:center;color:#c9d1d8;background:rgba(0,0,0,.6);pointer-events:none}
+  [hidden]{display:none !important}
 </style></head><body>
 <video playsinline muted></video>
 <div class="cover" hidden></div>
