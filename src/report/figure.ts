@@ -1,6 +1,7 @@
 import { AFTER, BEFORE, BIN, SHUFFLES, type PeriResult, type PositionResult } from "../analysis/periEvent";
 import type { GazeSeries } from "../analysis/gazeModel";
 import type { Region } from "../store/types";
+import { fmtTime } from "../ui/util";
 
 export interface FigureData {
   title: string;
@@ -181,14 +182,18 @@ function drawPanelB(ctx: CanvasRenderingContext2D, d: FigureData, b: Box, font: 
     ctx.beginPath(); ctx.moveTo(ox, Y(a)); ctx.lineTo(ox + pw, Y(a)); ctx.stroke();
     ctx.textAlign = "right"; ctx.fillText(`${a}°`, ox - 6, Y(a) + 4);
   }
-  // Regions.
-  for (const r of d.regions) {
-    const x0 = X(Math.min(r.h0, r.h1)), x1 = X(Math.max(r.h0, r.h1)), y0 = Y(Math.max(r.v0, r.v1)), y1 = Y(Math.min(r.v0, r.v1));
-    ctx.strokeStyle = r.colour; ctx.lineWidth = 2.5; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
-    font(14, 650); ctx.textAlign = "left";
-    const tw = ctx.measureText(r.name).width;
-    ctx.fillStyle = "rgba(255,255,255,0.88)"; ctx.fillRect(x0 + 2, y0 - 20, tw + 8, 18);
-    ctx.fillStyle = r.colour; ctx.fillText(r.name, x0 + 6, y0 - 6);
+  // Regions (hidden ones left out); a moved region shows each later position dashed, with its time.
+  for (const reg of d.regions.filter((x) => !x.hidden)) {
+    const positions = [{ ...reg, label: reg.name, dashed: false }, ...(reg.moves ?? []).map((m) => ({ ...m, label: `${reg.name} (from ${fmtTime(m.t, 0)})`, dashed: true }))];
+    for (const r of positions) {
+      const x0 = X(Math.min(r.h0, r.h1)), x1 = X(Math.max(r.h0, r.h1)), y0 = Y(Math.max(r.v0, r.v1)), y1 = Y(Math.min(r.v0, r.v1));
+      ctx.strokeStyle = reg.colour; ctx.lineWidth = 2.5; if (r.dashed) ctx.setLineDash([7, 5]);
+      ctx.strokeRect(x0, y0, x1 - x0, y1 - y0); ctx.setLineDash([]);
+      font(14, 650); ctx.textAlign = "left";
+      const tw = ctx.measureText(r.label).width;
+      ctx.fillStyle = "rgba(255,255,255,0.88)"; ctx.fillRect(x0 + 2, y0 - 20, tw + 8, 18);
+      ctx.fillStyle = reg.colour; ctx.fillText(r.label, x0 + 6, y0 - 6);
+    }
   }
   if (d.dots) {
     for (const hot of [false, true]) {

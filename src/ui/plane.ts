@@ -1,7 +1,8 @@
 import type { GazeSeries } from "../analysis/gazeModel";
 import { indexAt } from "../analysis/gazeModel";
 import type { Interval } from "../analysis/intervals";
-import type { Region } from "../store/types";
+import { rectAt, type Region } from "../store/types";
+import { fmtTime } from "./util";
 import type { LivePoint } from "../analysis/live";
 import { cssVar, fitCanvas } from "./util";
 
@@ -51,6 +52,7 @@ export class GazePlane {
   private drag: { h: number; v: number } | null = null;
   private grab: { id: string; how: Grab; from: { h: number; v: number }; orig: Rect; moved: boolean } | null = null;
   private regions: Region[] = [];
+  private ph = 0;
   private editable = false;
   onRect?: (r: Rect | null) => void;
   /** A region is being moved or resized (called repeatedly), then finished. */
@@ -68,7 +70,7 @@ export class GazePlane {
       const hit = this.editable ? this.hitRegion(e) : null;
       if (hit) {
         const r = this.regions.find((x) => x.id === hit.id)!;
-        this.grab = { id: hit.id, how: hit.how, from: this.toDeg(e), orig: norm(r), moved: false };
+        this.grab = { id: hit.id, how: hit.how, from: this.toDeg(e), orig: norm(rectAt(r, this.ph)), moved: false };
         return;
       }
       this.drag = this.toDeg(e);
@@ -121,7 +123,8 @@ export class GazePlane {
     const tol = 7;
     let best: { id: string; how: Grab; area: number } | null = null;
     for (const reg of this.regions) {
-      const r = norm(reg);
+      if (reg.hidden) continue;
+      const r = norm(rectAt(reg, this.ph));
       const x0 = X(r.h0), x1 = X(r.h1), y0 = Y(r.v1), y1 = Y(r.v0);
       if (x < x0 - tol || x > x1 + tol || y < y0 - tol || y > y1 + tol) continue;
       const nearW = Math.abs(x - x0) <= tol, nearE = Math.abs(x - x1) <= tol, nearN = Math.abs(y - y0) <= tol, nearS = Math.abs(y - y1) <= tol;
@@ -295,8 +298,12 @@ export class GazePlane {
     }
 
     // Regions.
-    this.regions = st.regions; this.editable = st.editable;
-    for (const r of st.regions) {
+    this.regions = st.regions; this.editable = st.editable; this.ph = st.playhead;
+    for (const reg of st.regions) {
+      if (reg.hidden) continue;
+      const cur = rectAt(reg, st.playhead);
+      const moveIdx = reg.moves ? reg.moves.filter((m) => m.t <= st.playhead).length : 0;
+      const r = { ...reg, ...cur, name: moveIdx ? `${reg.name} (from ${fmtTime(reg.moves![moveIdx - 1].t, 0)})` : reg.name };
       const x0 = X(Math.min(r.h0, r.h1)), x1 = X(Math.max(r.h0, r.h1)), y0 = Y(Math.max(r.v0, r.v1)), y1 = Y(Math.min(r.v0, r.v1));
       const sel = r.id === st.selectedRegion;
       ctx.strokeStyle = r.colour; ctx.lineWidth = sel ? 3 : 2;

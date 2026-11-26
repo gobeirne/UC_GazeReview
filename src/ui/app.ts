@@ -229,7 +229,7 @@ export class App {
       i.addEventListener("change", () => this.setDragMode(i.value as "highlight" | "region")));
     this.plane.onRegionDrag = (id, r) => {
       const reg = this.rec?.regions.find((x) => x.id === id);
-      if (reg) Object.assign(reg, r, { auto: false });
+      if (reg) { reg.auto = false; this.applyRegionChange(reg, r); }
       this.editRegionId = id;
       this.pendingRegion = null;
     };
@@ -787,7 +787,8 @@ export class App {
       <button id="rf-add" class="primary">${editing ? "Save" : "Add region"}</button>
       ${editing ? `<button id="rf-delete" class="danger">Delete region</button>` : ""}
       <button id="rf-cancel">${editing ? "Close" : "Cancel"}</button>
-      ${editing ? `<span class="muted small">Drag the region on the plane to move it, or its edges and corners to resize it.</span>` : ""}`;
+      ${editing ? `<span class="muted small">Drag the region on the plane to move it, or its edges and corners to resize it.</span>` : ""}
+      ${editing?.moves?.length ? `<div class="moves small">Later positions: ${editing.moves.map((m, i) => `<span class="move">from ${fmtTime(m.t, 0)} <button type="button" data-move-go="${i}">Go</button><button type="button" data-move-del="${i}">Delete</button></span>`).join(" ")}</div>` : ""}`;
     const name = this.q<HTMLInputElement>("#rf-name");
     if (!editing) { name.focus(); name.select(); }
     f.querySelectorAll<HTMLButtonElement>("[data-preset]").forEach((b) => b.addEventListener("click", () => {
@@ -818,7 +819,35 @@ export class App {
     this.q("#rf-add").addEventListener("click", save);
     name.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
     this.root.querySelector("#rf-delete")?.addEventListener("click", () => editing && this.deleteRegion(editing.id));
+    f.querySelectorAll<HTMLButtonElement>("[data-move-go]").forEach((b) => b.addEventListener("click", () => {
+      const m = editing?.moves?.[Number(b.dataset.moveGo)]; if (m) { this.video.pause(); this.seek(m.t + 1); }
+    }));
+    f.querySelectorAll<HTMLButtonElement>("[data-move-del]").forEach((b) => b.addEventListener("click", () => {
+      if (!editing?.moves) return;
+      editing.moves.splice(Number(b.dataset.moveDel), 1);
+      if (!editing.moves.length) delete editing.moves;
+      this.renderRegionForm(); this.saveRec(); this.recompute();
+    }));
     this.q("#rf-cancel").addEventListener("click", () => { this.pendingRegion = null; this.editRegionId = null; this.renderRegionForm(); });
+  }
+
+  /**
+   * Applies a moved or resized rectangle. "Adjust" changes the position in effect at the playhead
+   * (its first position, or a later one); "new" starts a new position from the playhead on, for an
+   * object that was moved part-way through.
+   */
+  private applyRegionChange(reg: Region, r: { h0: number; h1: number; v0: number; v1: number }) {
+    const ph = this.playhead();
+    const mode = this.root.querySelector<HTMLSelectElement>("#region-move-mode")?.value ?? "adjust";
+    const moves = reg.moves ?? [];
+    if (mode === "new") {
+      let m = moves.find((x) => Math.abs(x.t - ph) < 1000);
+      if (!m) { m = { t: Math.round(ph), ...r }; moves.push(m); moves.sort((a, b) => a.t - b.t); reg.moves = moves; }
+      else Object.assign(m, r);
+      return;
+    }
+    const cur = [...moves].reverse().find((m) => m.t <= ph);
+    Object.assign(cur ?? reg, r);
   }
 
   private freeColour(n: number): string {
@@ -861,6 +890,8 @@ export class App {
 
   private setDragMode(m: "highlight" | "region") {
     this.dragMode = m;
+    const rm = this.root.querySelector<HTMLElement>(".region-move");
+    if (rm) rm.hidden = m !== "region";
     const radio = this.root.querySelector<HTMLInputElement>(`input[name="dragmode"][value="${m}"]`);
     if (radio) radio.checked = true;
     if (m !== "region") { this.editRegionId = null; this.pendingRegion = null; this.renderRegionForm(); }
@@ -870,9 +901,11 @@ export class App {
     const t = e.target as HTMLInputElement;
     const r = this.rec?.regions.find((x) => x.id === t.dataset.id);
     if (!r) return;
+    if (t.dataset.field === "show") { r.hidden = !t.checked; this.saveRec(); this.dirty = true; this.drawCanvases(); return; }
     r.auto = false;
     if (t.dataset.field === "name") r.name = t.value.trim() || r.name;
     if (t.dataset.field === "screen") { r.isScreen = t.checked; if (t.checked) r.colour = SCREEN_COLOUR; }
+    if (t.dataset.field === "show") { r.hidden = !t.checked; this.saveRec(); this.dirty = true; this.drawCanvases(); return; }
     if (t.dataset.field && ["h0", "h1", "v0", "v1"].includes(t.dataset.field)) {
       const v = parseFloat(t.value);
       if (Number.isFinite(v)) (r as unknown as Record<string, number>)[t.dataset.field] = v;
@@ -1333,7 +1366,7 @@ export class App {
     }
     const p = this.live.last;
     const tol = this.video.paused ? 1.5 * dt + 50 : 500; // live tracking may trail the playhead while playing
-    if (this.prefs.live && p && Math.abs(p.t - ph) <= tol) return { h: p.h, v: p.v, label: labelPoint(p.h, p.v, this.rec?.regions ?? [], g), source: "live" };
+    if (this.prefs.live && p && Math.abs(p.t - ph) <= tol) return { h: p.h, v: p.v, label: labelPoint(p.h, p.v, this.rec?.regions ?? [], g, p.t), source: "live" };
     return null;
   }
 
@@ -1826,13 +1859,14 @@ export class App {
     const warn = screenWarning(this.rec.regions);
     const total = [...d.entries()].filter(([k]) => k !== NONE).reduce((s, [, v]) => s + v, 0) || 1;
     const pct = (k: number) => `${Math.round((100 * (d.get(k) ?? 0)) / total)}%`;
-    box.innerHTML = (warn ? `<p class="warn-line">${esc(warn)}</p>` : "") + `<table><thead><tr><th></th><th>Name</th><th>Screen</th><th>Time</th><th class="coords">Extent (°)</th><th></th></tr></thead><tbody>` +
+    box.innerHTML = (warn ? `<p class="warn-line">${esc(warn)}</p>` : "") + `<table><thead><tr><th></th><th>Name</th><th>Screen</th><th title="Shown on the plane and in exports (always used in the analysis)">Show</th><th>Time</th><th class="coords">First position (°)</th><th></th></tr></thead><tbody>` +
       this.rec.regions.map((r, i) => `<tr>
         <td><span class="swatch" style="background:${r.colour}"></span></td>
         <td><input data-id="${r.id}" data-field="name" value="${esc(r.name)}" size="12" list="region-names" aria-label="Region name"></td>
         <td><input type="checkbox" data-id="${r.id}" data-field="screen" ${r.isScreen ? "checked" : ""} aria-label="This region is the screen"></td>
+        <td><input type="checkbox" data-id="${r.id}" data-field="show" ${r.hidden ? "" : "checked"} aria-label="Show this region"></td>
         <td class="num">${r.isScreen ? pct(SCREEN) : pct(i)}</td>
-        <td class="coords">${coordInputs(r)}</td>
+        <td class="coords">${coordInputs(r)}${r.moves?.length ? `<span class="coord">moved ${r.moves.length}× (${r.moves.map((m) => fmtTime(m.t, 0)).join(", ")})</span>` : ""}</td>
         <td><button data-act="delete" data-id="${r.id}">Remove</button></td></tr>`).join("") +
       `<tr><td><span class="swatch" style="background:var(--elsewhere)"></span></td><td colspan="2" class="muted">Elsewhere</td><td class="num">${pct(ELSEWHERE)}</td><td></td><td></td></tr>` +
       `</tbody></table>`;
@@ -2085,6 +2119,7 @@ const TEMPLATE = `
         <span>On the plane:</span>
         <label class="check"><input type="radio" name="dragmode" value="highlight" checked> drag to highlight those times</label>
         <label class="check"><input type="radio" name="dragmode" value="region"> label and edit regions</label>
+        <label class="small region-move" hidden>Dragging a region <select id="region-move-mode"><option value="adjust">adjusts its position at this moment</option><option value="new">moves it from this moment on</option></select></label>
         <label>Heatmap of <select id="heat-scope"><option value="scope">the segment shown</option><option value="brush">highlighted stretch</option><option value="before">the time before each saved response</option><option value="dest">where each look went (dots)</option><option value="item">the trace for one item</option><option value="items">traces for ticked items</option><option value="off">nothing (off)</option></select></label>
         <button id="fit-plane">Fit view</button>
         <button id="clear-hl">Clear highlights</button>

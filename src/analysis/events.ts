@@ -1,4 +1,4 @@
-import type { Region } from "../store/types";
+import { rectAt, type Region } from "../store/types";
 import type { GazeSeries } from "./gazeModel";
 
 /** Per-frame label: region index, SCREEN, ELSEWHERE (off-screen, unlabelled) or NONE (no gaze). */
@@ -35,13 +35,15 @@ export function classify(g: GazeSeries, regions: Region[]): Int16Array {
   const lab = new Int16Array(g.n);
   const order = regions.map((r, i) => ({ r, i })).sort((a, b) => Number(a.r.isScreen) - Number(b.r.isScreen));
   const hasScreen = regions.some((r) => r.isScreen);
+  const moving = regions.some((r) => r.moves?.length);
   for (let k = 0; k < g.n; k++) {
     if (!g.ok[k]) { lab[k] = NONE; continue; }
     const h = g.h[k], v = g.v[k];
     let l = hasScreen ? ELSEWHERE : (g.onScreen[k] ? SCREEN : ELSEWHERE);
-    for (const { r, i } of order) {
+    for (const { r: reg, i } of order) {
+      const r = moving ? rectAt(reg, g.t[k]) : reg;
       if (h >= Math.min(r.h0, r.h1) && h <= Math.max(r.h0, r.h1) && v >= Math.min(r.v0, r.v1) && v <= Math.max(r.v0, r.v1)) {
-        l = r.isScreen ? SCREEN : i;
+        l = reg.isScreen ? SCREEN : i;
         break;
       }
     }
@@ -98,10 +100,11 @@ export function dwell(g: GazeSeries, lab: Int16Array, t0: number, t1: number): M
 }
 
 /** Label for one gaze point (for live playback), using the same rules as classify(). */
-export function labelPoint(h: number, v: number, regions: Region[], g: GazeSeries | null): number {
+export function labelPoint(h: number, v: number, regions: Region[], g: GazeSeries | null, t = 0): number {
   const order = regions.map((r, i) => ({ r, i })).sort((a, b) => Number(a.r.isScreen) - Number(b.r.isScreen));
-  for (const { r, i } of order) {
-    if (h >= Math.min(r.h0, r.h1) && h <= Math.max(r.h0, r.h1) && v >= Math.min(r.v0, r.v1) && v <= Math.max(r.v0, r.v1)) return r.isScreen ? SCREEN : i;
+  for (const { r: reg, i } of order) {
+    const r = rectAt(reg, t);
+    if (h >= Math.min(r.h0, r.h1) && h <= Math.max(r.h0, r.h1) && v >= Math.min(r.v0, r.v1) && v <= Math.max(r.v0, r.v1)) return reg.isScreen ? SCREEN : i;
   }
   if (regions.some((r) => r.isScreen) || !g) return ELSEWHERE;
   return Math.hypot(h - g.model.screenH, v - g.model.screenV) <= g.model.screenRadius ? SCREEN : ELSEWHERE;

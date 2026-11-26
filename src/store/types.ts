@@ -58,6 +58,19 @@ export interface Region {
   h0: number; h1: number; v0: number; v1: number;
   /** Placed automatically from the on-screen cluster; refitted as more is analysed until the reviewer edits it. */
   auto?: boolean;
+  /** Later positions: from each time (video ms) on, the region is at this rectangle (an object that was moved). */
+  moves?: RegionMove[];
+  /** Not drawn on the plane or in exports; still used in the analysis. */
+  hidden?: boolean;
+}
+
+export interface RegionMove { t: number; h0: number; h1: number; v0: number; v1: number }
+
+/** The region's rectangle at a moment: its latest move at or before t, else its first position. */
+export function rectAt(r: Region, t: number): { h0: number; h1: number; v0: number; v1: number } {
+  let cur: { h0: number; h1: number; v0: number; v1: number } = r;
+  if (r.moves) for (const m of r.moves) { if (m.t <= t) cur = m; else break; }
+  return cur;
 }
 
 export interface RecordingSettings {

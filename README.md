@@ -88,6 +88,10 @@ To add one:
 
 To change one, in *label and edit regions* mode: click a region to rename it, mark or unmark it as the screen, or delete it (or press Delete). Drag inside it to move it, or drag its edges and corners to resize it. The regions table under the timeline also lets you rename them and type their edges in degrees. Glance lists and timings update as soon as a region changes.
 
+**Objects that were moved.** If something is moved part-way through (a phone shifted from left to right at 36:53, say), go to that moment, set *Dragging a region* to *moves it from this moment on*, and drag the region to its new place. From then on it counts at the new position; before, at the old one. A region can move any number of times. With *adjusts its position at this moment* (the default), dragging changes whichever position is in effect at the playhead. On the plane, a moved region's label shows when its current position started; its edit form lists the later positions, each with *Go* and *Delete*; the regions table says how many times it moved. The report figure draws later positions dashed, with their times.
+
+**Showing and hiding regions.** Untick *Show* in the regions table to leave a region off the plane and out of image exports, for example one that isn't relevant to a particular figure. It is still used in the analysis, and ticking it again brings it back.
+
 ### Timeline
 
 Horizontal and vertical gaze against time, in the style of a VNG trace, with the screen centre as a dashed line. Below them the *where* band colours each frame by region (orange for off-screen but unlabelled, grey for no gaze), and black bars mark the listed glances.

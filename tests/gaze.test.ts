@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { buildGaze } from "../src/analysis/gazeModel";
-import { classify, findEvents, SCREEN } from "../src/analysis/events";
+import { classify, ELSEWHERE, findEvents, SCREEN } from "../src/analysis/events";
 import { DEFAULT_SETTINGS, FIELDS, FP_SIZE, type Field, type Recording, type Run } from "../src/store/types";
 
 /** Deterministic pseudo-random numbers. */
@@ -159,5 +159,22 @@ describe("destination of an out-and-back loop", () => {
     const d = destination(g, 3, n - 4);
     expect(Math.abs(d.h + 38)).toBeLessThan(2);
     expect(Math.abs(d.v + 8)).toBeLessThan(2);
+  });
+});
+
+describe("regions that move", () => {
+  test("each frame is judged against the position in effect at its time", async () => {
+    const { rectAt } = await import("../src/store/types");
+    const phone = { id: "p", name: "Phone", colour: "#000", isScreen: false, h0: -50, h1: -30, v0: -15, v1: 5,
+      moves: [{ t: 60_000, h0: 30, h1: 50, v0: -15, v1: 5 }] };
+    expect(rectAt(phone, 59_999).h0).toBe(-50);
+    expect(rectAt(phone, 60_000).h0).toBe(30);
+    // Gaze at the left position before 60 s and at the right position after.
+    const n = 4;
+    const g = { n, t: Float64Array.from([10_000, 20_000, 70_000, 80_000]), h: Float32Array.from([-40, 40, -40, 40]), v: Float32Array.from([-5, -5, -5, -5]),
+      ok: new Uint8Array(n).fill(1), onScreen: new Uint8Array(n), model: { screenH: 0, screenV: -15, screenRadius: 12 } } as never;
+    const screen = { id: "s", name: "Screen", colour: "#0f0", isScreen: true, h0: -10, h1: 10, v0: -30, v1: 0 };
+    const lab = classify(g, [screen, phone]);
+    expect(Array.from(lab)).toEqual([1, ELSEWHERE, ELSEWHERE, 1]);
   });
 });
